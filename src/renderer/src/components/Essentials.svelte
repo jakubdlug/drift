@@ -54,7 +54,7 @@
           actions.itemMenu(id)
         }}
       >
-        <Favicon src={faviconOf(item, rt)} label={item.title} size={20} />
+        <Favicon src={faviconOf(item, rt)} label={item.title} size={17} />
         {#if rt?.badge}<span class="badge"></span>{/if}
       </button>
     {/if}
@@ -67,17 +67,17 @@
 <style>
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+    gap: 6px;
     padding: 4px 0 10px;
   }
   .grid.empty { grid-template-columns: 1fr; }
   .tile {
     position: relative;
-    height: 52px;
+    height: 40px;
     display: grid;
     place-items: center;
-    border-radius: 12px;
+    border-radius: 10px;
     background: var(--tile);
     transition: background 0.1s;
   }
@@ -89,10 +89,10 @@
   .tile.drop { box-shadow: -3px 0 0 var(--accent); }
   .badge {
     position: absolute;
-    bottom: 9px;
-    right: calc(50% - 16px);
-    width: 7px;
-    height: 7px;
+    bottom: 6px;
+    right: calc(50% - 13px);
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: #ff4d4d;
     box-shadow: 0 0 0 2px var(--ws);
