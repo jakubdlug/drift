@@ -12,7 +12,7 @@ target: sidebar (domyślnie) | page | find
   state                         stan: workspace, aktywna karta, pinned/today
   status                        płaski status (mode, url, peekOpen, palette, focus…)
   open <nazwa>                  otwórz kartę po tytule/URL (Essentials, pinned, Today, inne workspace'y)
-  wait [target] <warunek…>      klucz=wart | klucz!=wart | klucz~fragment | el=<sel> | text~<tekst>
+  wait [target] <warunek…>      klucz=wart | klucz!=wart | klucz~frag | klucz!~frag | el=<sel> | text~<tekst>
                                 | selector=<css>; --timeout ms (domyślnie 5000)
   tree [target]                 drzewo dostępności z [ref] (--all, --filter tekst)
   snapshot <target> <sel>       drzewo jednego fragmentu, np. dialog "Nowa wiadomość"
@@ -100,7 +100,7 @@ function buildRequest({ cmd, rest, flags }) {
     case 'wait': {
       const target = takeTarget()
       // Values may contain spaces ("el=textbox Treść wiadomości"): split only before the next key=
-      const conditions = r.join(' ').split(/\s+(?=[\w.]+\s*(?:!=|=|~))/).filter(Boolean)
+      const conditions = r.join(' ').split(/\s+(?=[\w.]+\s*(?:!=|!~|=|~))/).filter(Boolean)
       return { method: 'wait', params: { target, conditions, timeout: flags.timeout ? Number(flags.timeout) : undefined } }
     }
     case 'click':

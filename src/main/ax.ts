@@ -136,9 +136,11 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
         const val = n.value?.value
         if (val !== undefined && val !== '' && role !== 'link') line += ` = "${String(val).slice(0, 60)}"`
         for (const p of n.properties ?? []) {
-          if (['checked', 'expanded', 'selected', 'pressed'].includes(p.name) && p.value.value) line += ` (${p.name})`
-          if (p.name === 'focused' && p.value.value) line += ' (focus)'
-          if (p.name === 'disabled' && p.value.value) line += ' (disabled)'
+          // CDP reports tristate props as strings ("true" / "false" / "mixed")
+          const on = p.value.value === true || p.value.value === 'true' || p.value.value === 'mixed'
+          if (['checked', 'expanded', 'selected', 'pressed'].includes(p.name) && on) line += ` (${p.name}${p.value.value === 'mixed' ? ': mixed' : ''})`
+          if (p.name === 'focused' && on) line += ' (focus)'
+          if (p.name === 'disabled' && on) line += ' (disabled)'
         }
         if (role === 'link' && n.backendDOMNodeId && hrefs.has(n.backendDOMNodeId)) line += ` → ${shortHref(hrefs.get(n.backendDOMNodeId)!, base)}`
         if (!filter || line.toLowerCase().includes(filter)) lines.push(line)
@@ -188,6 +190,11 @@ export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true)
     if (q.role && role !== q.role) continue
     if (!q.role && (TRANSPARENT.has(role) || role === 'StaticText')) continue
     const name = String(n.name?.value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    // Role-only query ("main", "dialog"): any node with that role
+    if (!want && q.role) {
+      scored.push({ id: n.backendDOMNodeId, score: 1 })
+      continue
+    }
     if (!name) continue
     const score = name === want ? 3 : name.startsWith(want) ? 2 : name.includes(want) ? 1 : 0
     if (score) scored.push({ id: n.backendDOMNodeId, score: score + (INTERACTIVE.has(role) ? 0.5 : 0) })

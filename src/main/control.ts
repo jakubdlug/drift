@@ -154,6 +154,7 @@ function parseSelector(raw: string): { ref?: number; css?: string; text?: string
   if (sel.startsWith('css:')) return { css: sel.slice(4).trim() }
   if (sel.startsWith('text:')) return { text: sel.slice(5).trim() }
   const unquote = (v: string): string => v.trim().replace(/^["'](.*)["']$/, '$1')
+  if (ROLES.has(sel)) return { role: sel, name: '' }
   const m = sel.match(/^(\w+)\s+(.+)$/)
   if (m && ROLES.has(m[1])) return { role: m[1], name: unquote(m[2]) }
   return { name: unquote(sel) }
@@ -221,13 +222,13 @@ async function settle(ctx: ControlContext, maxMs = 1500): Promise<Status> {
 
 interface Condition {
   key: string
-  op: '=' | '!=' | '~'
+  op: '=' | '!=' | '~' | '!~'
   value: string
 }
 
 function parseCondition(raw: string): Condition {
-  const m = raw.match(/^([\w.]+)\s*(!=|=|~)\s*(.*)$/)
-  if (!m) throw new Error(`Zły warunek "${raw}" — użyj klucz=wartość, klucz!=wartość albo klucz~fragment`)
+  const m = raw.match(/^([\w.]+)\s*(!=|!~|=|~)\s*(.*)$/)
+  if (!m) throw new Error(`Zły warunek "${raw}" — użyj klucz=wartość, klucz!=wartość, klucz~fragment albo klucz!~fragment`)
   return { key: m[1], op: m[2] as Condition['op'], value: m[3] }
 }
 
@@ -239,14 +240,14 @@ async function checkCondition(ctx: ControlContext, c: Condition, target: Target)
       () => true,
       () => false
     )
-    return c.op === '!=' ? !found : found
+    return c.op.startsWith('!') ? !found : found
   }
   if (c.key === 'text') {
     const wc = ctx.target(target)
     if (!wc) return false
     const body = String(await wc.executeJavaScript('document.body.innerText').catch(() => '')).toLowerCase()
     const has = body.includes(c.value.toLowerCase())
-    return c.op === '!=' ? !has : has
+    return c.op.startsWith('!') ? !has : has
   }
   if (c.key === 'selector') {
     const wc = ctx.target(target)
@@ -254,12 +255,13 @@ async function checkCondition(ctx: ControlContext, c: Condition, target: Target)
     const found = await wc
       .executeJavaScript(`(() => { const e = document.querySelector(${JSON.stringify(c.value)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 })()`)
       .catch(() => false)
-    return c.op === '!=' ? !found : !!found
+    return c.op.startsWith('!') ? !found : !!found
   }
   const actual = String(ctx.status()[c.key] ?? '')
   if (c.op === '=') return actual === c.value
   if (c.op === '!=') return actual !== c.value
-  return actual.toLowerCase().includes(c.value.toLowerCase())
+  const has = actual.toLowerCase().includes(c.value.toLowerCase())
+  return c.op === '!~' ? !has : has
 }
 
 // ---------- commands ----------
