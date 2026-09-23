@@ -71,7 +71,7 @@ scripts/drift-ctl text page             # tekst aktywnej strony
 scripts/drift-ctl logs                  # błędy konsoli sidebara
 ```
 
-Wskazywanie elementów (`<sel>`): `12` (ref z `tree`), `button Wyślij` (rola + nazwa dostępności), `Wyślij` (sama nazwa), `css:.tile`, `text:Clear`. Gdy nic nie pasuje, błąd podaje najbardziej podobne elementy.
+Wskazywanie elementów (`<sel>`): `12` (ref z `tree`), `button Wyślij` (rola + nazwa dostępności), `Wyślij` (sama nazwa), `css:.tile`, `text:Clear`. Gdy nic nie pasuje, błąd (także timeout `wait el=`) podaje najbardziej podobne elementy. Prefiks `~` (`menuitem ~Szybkość`) akceptuje jedyny podobny element, gdy brak dokładnego — raport oznacza to `≈`. Role pól tekstowych (`textbox`, `combobox`, `searchbox`) są wymienne, a „1.5” == „1,5”.
 
 Cały scenariusz można wysłać w **jednym** zapytaniu (`run`, stop na pierwszym błędzie):
 

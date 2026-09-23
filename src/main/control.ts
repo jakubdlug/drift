@@ -58,9 +58,16 @@ export function captureConsole(wc: WebContents, label: string): void {
 }
 
 /** Pages: only errors and failed loads, truncated — no regular console output */
+/** Third-party ad/tracking noise that says nothing about whether a task worked */
+const NOISE = /doubleclick|googleads|googlesyndication|google-analytics|googletagmanager|adservice|ERR_BLOCKED_BY_CLIENT|net::ERR_ABORTED/i
+
 export function capturePageErrors(wc: WebContents): void {
   wc.on('console-message', (e) => {
-    if (e.level === 'error') pushLog('error', `[page ${hostOf(wc.getURL())}] ${e.message.slice(0, 200)}`)
+    if (e.level !== 'error' || NOISE.test(e.message)) return
+    const line = `[page ${hostOf(wc.getURL())}] ${e.message.replace(/\s+/g, ' ').slice(0, 160)}`
+    // Same error in a loop (retries, polling) is reported once
+    if (logs.slice(-20).some((l) => l.line.endsWith(line))) return
+    pushLog('error', line)
   })
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
     // -3 = aborted (redirects, user navigating away)
@@ -115,7 +122,7 @@ const hitJs = (x: number, y: number): string => `(() => {
   ${DESCRIBE_FN}
   const hit = document.elementFromPoint(${x}, ${y});
   const target = document.querySelector('[data-drift-target]');
-  const ok = !target || !!(hit && (hit === target || target.contains(hit) || hit.contains(target)));
+  const ok = !target || !!(hit && (hit === target || target.contains(hit)));
   return { ok, hit: describe(hit), target: target ? describe(target) : null };
 })()`
 
@@ -127,7 +134,7 @@ async function hitForRef(wc: WebContents, backendNodeId: number, x: number, y: n
     functionDeclaration: `function (x, y) {
       ${DESCRIBE_FN}
       const hit = document.elementFromPoint(x, y);
-      const ok = !!(hit && (hit === this || this.contains(hit) || hit.contains(this)));
+      const ok = !!(hit && (hit === this || this.contains(hit)));
       return { ok, hit: describe(hit), target: describe(this) };
     }`,
     arguments: [{ value: x }, { value: y }],
@@ -146,10 +153,25 @@ async function hitForRef(wc: WebContents, backendNodeId: number, x: number, y: n
  *   button Wyślij      → role + accessible name (role must be a known ARIA role)
  *   Wyślij             → accessible name, any role
  */
+/** Fuzzy matches used during the current command, reported back to the caller */
+let fuzzyNotes: string[] = []
+
 type Resolved = { kind: 'node'; backendNodeId: number } | { kind: 'dom'; x: number; y: number }
 
-function parseSelector(raw: string): { ref?: number; css?: string; text?: string; role?: string; name?: string } {
-  const sel = raw.trim()
+function parseSelector(raw: string): { ref?: number; css?: string; text?: string; role?: string; name?: string; fuzzy?: boolean } {
+  let sel = raw.trim()
+  // "~name" / "role ~name": accept the single most similar element if nothing matches exactly
+  let fuzzy = false
+  const fz = sel.match(/^(?:(\w+)\s+)?~(.+)$/)
+  if (fz) {
+    fuzzy = true
+    sel = fz[1] ? `${fz[1]} ${fz[2]}` : fz[2]
+  }
+  const parsed = parseSelectorPlain(sel)
+  return { ...parsed, fuzzy }
+}
+
+function parseSelectorPlain(sel: string): { ref?: number; css?: string; text?: string; role?: string; name?: string } {
   if (/^\d+$/.test(sel)) return { ref: Number(sel) }
   if (sel.startsWith('css:')) return { css: sel.slice(4).trim() }
   if (sel.startsWith('text:')) return { text: sel.slice(5).trim() }
@@ -168,7 +190,15 @@ async function resolve(wc: WebContents, raw: string, requireVisible = true): Pro
     if (!found) throw new Error(`Nie znaleziono: ${raw}`)
     return { kind: 'dom', ...found }
   }
-  const id = await axFind(wc, { role: s.role, name: s.name! }, requireVisible)
+  let id = await axFind(wc, { role: s.role, name: s.name! }, requireVisible)
+  if (!id && s.fuzzy) {
+    const near = await axCandidates(wc, s.role, s.name, 2, true).catch(() => [])
+    if (near.length === 1) {
+      const m = near[0].match(/^(\w+) "(.*)"$/)
+      if (m) id = await axFind(wc, { role: m[1], name: m[2] }, requireVisible)
+      if (id) fuzzyNotes.push(`~ "${s.name}" dopasowano do ${near[0]}`)
+    }
+  }
   if (!id) {
     const hint = await axCandidates(wc, s.role, s.name).catch(() => [])
     throw new Error(`Nie znaleziono${requireVisible ? ' widocznego' : ''} elementu: ${raw}${hint.length ? `\n   dostępne ${s.role ?? 'interaktywne'}: ${hint.join(', ')}` : ''}`)
@@ -190,13 +220,77 @@ async function point(wc: WebContents, raw: string): Promise<{ x: number; y: numb
   return { x, y, backendNodeId: r.backendNodeId, hit: await hitForRef(wc, r.backendNodeId, x, y) }
 }
 
+/** Marks the editable element at/inside a DOM node (the node itself, or an input in a wrapper) */
+const MARK_EDITABLE_FN = `function () {
+  const isEditable = (e) => e && (e.matches('input:not([type=hidden]):not([type=checkbox]):not([type=radio]),textarea,select') || e.isContentEditable);
+  let el = isEditable(this) ? this : this.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]),textarea,[contenteditable=""],[contenteditable="true"]');
+  // Some editors (Keep, Docs) only turn contenteditable on after a click: accept a focusable text-field role
+  if (!el && this.matches('[role=textbox],[role=combobox],[role=searchbox],[tabindex]')) el = this;
+  if (!el) return false;
+  document.querySelectorAll('[data-drift-target]').forEach((e) => e.removeAttribute('data-drift-target'));
+  el.setAttribute('data-drift-target', '1');
+  el.scrollIntoView({ block: 'nearest' });
+  return true;
+}`
+
+/** Like point(), but aims at the actual editable field, never a wrapper */
+async function editablePoint(wc: WebContents, raw: string): Promise<Awaited<ReturnType<typeof point>>> {
+  const r = await resolve(wc, raw)
+  let marked = false
+  if (r.kind === 'node') {
+    const { object } = (await wc.debugger.sendCommand('DOM.resolveNode', { backendNodeId: r.backendNodeId })) as { object: { objectId: string } }
+    const { result } = (await wc.debugger.sendCommand('Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration: MARK_EDITABLE_FN,
+      returnByValue: true
+    })) as { result: { value: boolean } }
+    marked = result.value
+  } else {
+    marked = await wc.executeJavaScript(`(${MARK_EDITABLE_FN}).call(document.querySelector('[data-drift-target]'))`)
+  }
+  if (!marked) throw new Error(`${raw} nie jest polem tekstowym i nie zawiera żadnego`)
+  const box = (await wc.executeJavaScript(
+    `(() => { const r = document.querySelector('[data-drift-target]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`
+  )) as { x: number; y: number }
+  const x = Math.round(box.x)
+  const y = Math.round(box.y)
+  return { x, y, hit: await wc.executeJavaScript(hitJs(x, y)) }
+}
+
+/** After the click: make sure the field has focus, replace its content, verify the result */
+async function fillFocused(wc: WebContents, value: string): Promise<string> {
+  await sleep(50)
+  const focus = (await wc.executeJavaScript(`(() => {
+    const t = document.querySelector('[data-drift-target]');
+    const a = document.activeElement;
+    if (t && a !== t && !t.contains(a)) t.focus();
+    const e = document.activeElement;
+    if (!t || (e !== t && !t.contains(e))) return { ok: false, active: e ? e.tagName.toLowerCase() : 'nic' };
+    if (typeof e.select === 'function') e.select();
+    else if (e.isContentEditable) document.getSelection().selectAllChildren(e);
+    else return { ok: false, active: e.tagName.toLowerCase() + ' (nieedytowalny po kliknięciu)' };
+    return { ok: true };
+  })()`)) as { ok: boolean; active?: string }
+  if (!focus.ok) throw new Error(`Po kliknięciu fokus jest na ${focus.active}, nie na polu — nic nie wpisano`)
+  wc.insertText(value)
+  await sleep(50)
+  const now = String(
+    await wc.executeJavaScript(`(() => { const t = document.querySelector('[data-drift-target]'); return t ? (t.value ?? t.innerText ?? '') : '' })()`)
+  )
+  if (!now.includes(value.slice(0, 20))) throw new Error(`Pole zawiera ${JSON.stringify(now.slice(0, 60))} zamiast wpisanego tekstu`)
+  return `wpisano ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
+}
+
 // ---------- status, diff, wait ----------
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function diff(before: Status, after: Status): string[] {
   const out: string[] = []
-  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)])
+  // For most tabs the sidebar title is the page title: show it once
+  if (before.title !== after.title) keys.delete('tab')
+  for (const k of keys) {
     if (before[k] !== after[k]) out.push(`${k}: ${fmt(before[k])} → ${fmt(after[k])}`)
   }
   return out
@@ -324,8 +418,16 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         const results = await Promise.all(conds.map((c) => checkCondition(ctx, c, targetName)))
         if (results.every(Boolean)) return `spełnione po ${Date.now() - start} ms`
         if (Date.now() - start > timeout) {
-          const failed = conds.filter((_, i) => !results[i]).map((c) => `${c.key}${c.op}${c.value} (jest: ${fmt(ctx.status()[c.key])})`)
-          throw new Error(`timeout ${timeout} ms, niespełnione: ${failed.join(', ')}`)
+          const failed = conds.filter((_, i) => !results[i])
+          const desc = failed.map((c) => `${c.key}${c.op}${c.value}${c.key === 'el' || c.key === 'text' || c.key === 'selector' ? '' : ` (jest: ${fmt(ctx.status()[c.key])})`}`)
+          // For a missing element, show what similar elements do exist (saves a lookup roundtrip)
+          const hints: string[] = []
+          for (const c of failed.filter((f) => f.key === 'el' && !f.op.startsWith('!'))) {
+            const t = ctx.target(targetName)
+            const q = parseSelector(c.value)
+            if (t && q.name !== undefined) hints.push(...(await axCandidates(t, q.role, q.name).catch(() => [])))
+          }
+          throw new Error(`timeout ${timeout} ms, niespełnione: ${desc.join(', ')}${hints.length ? `\n   podobne: ${hints.join(', ')}` : ''}`)
         }
         await sleep(50)
       }
@@ -335,12 +437,18 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
     case 'fill': {
       let target = wc()
       const raw = (p.sel as string) ?? (p.ref ? String(p.ref) : p.selector ? `css:${p.selector}` : `text:${p.text}`)
-      let pt = await point(target, raw)
+      const locate = (): ReturnType<typeof point> => (method === 'fill' ? editablePoint(target, raw) : point(target, raw))
+      let pt = await locate()
       // Compact sidebar: slide it in instead of clicking into the void
       if (targetName === 'sidebar' && !pt.hit?.ok && ctx.status().mode === 'edge') {
         await ctx.revealSidebar()
         target = wc()
-        pt = await point(target, raw)
+        pt = await locate()
+      }
+      // Menus and popovers often animate in: give an occluded target a moment to settle
+      for (let i = 0; i < 6 && pt.hit && !pt.hit.ok && pt.hit.hit !== 'nic'; i++) {
+        await sleep(120)
+        pt = await locate()
       }
       extra.hit = pt.hit
       const { x, y } = pt
@@ -363,20 +471,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 2 })
       }
       if (method === 'click') return `klik @${x},${y}`
-      // fill: select the field's current content so the new text replaces it
-      await sleep(60)
-      await target.executeJavaScript(`(() => {
-        const e = document.activeElement;
-        if (!e) return;
-        if ('select' in e && typeof e.select === 'function') e.select();
-        else if (e.isContentEditable) document.getSelection().selectAllChildren(e);
-      })()`)
-      target.insertText(String(p.value ?? ''))
-      await sleep(60)
-      const now = String(
-        await target.executeJavaScript(`(() => { const e = document.activeElement; return e ? (e.value ?? e.innerText ?? '') : '' })()`)
-      )
-      return `wpisano ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
+      return await fillFocused(target, String(p.value ?? ''))
     }
     case 'snapshot': {
       const target = wc()
@@ -449,6 +544,7 @@ async function handle(ctx: ControlContext, method: string, p: Record<string, unk
   const before = mutating ? ctx.status() : null
   const extra: Extra = {}
   const response: Record<string, unknown> = {}
+  fuzzyNotes = []
   try {
     response.result = await run(ctx, method, p, extra)
     response.ok = true
@@ -461,6 +557,7 @@ async function handle(ctx: ControlContext, method: string, p: Record<string, unk
     response.changes = diff(before, after)
   }
   if (extra.hit) response.hit = extra.hit
+  if (fuzzyNotes.length) response.notes = fuzzyNotes
   if (withMeta) {
     const errors = newErrors()
     if (errors.length) response.errors = errors

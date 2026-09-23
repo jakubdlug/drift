@@ -8,6 +8,7 @@ const USAGE = `drift-ctl <komenda> [target] [argumenty]
 
 target: sidebar (domyślnie) | page | find
 <sel>:  12 (ref z tree) | button Wyślij (rola + nazwa) | Wyślij (nazwa) | css:.tile | text:Clear
+        button ~Wyslij → przybliżone: jedyny podobny element, gdy brak dokładnego
 
   state                         stan: workspace, aktywna karta, pinned/today
   status                        płaski status (mode, url, peekOpen, palette, focus…)
@@ -162,6 +163,7 @@ function formatStep(r, prefix = '') {
     if (out !== undefined && out !== 'ok') lines.push(typeof out === 'string' ? out : JSON.stringify(out, null, 2))
   } else lines.push(`Błąd: ${r.error}`)
   if (r.hit && (r.ok || r.hit.ok)) lines.push(r.hit.ok ? `→ trafiono: ${r.hit.hit}` : `⚠ klik trafił w ${r.hit.hit}, a cel to ${r.hit.target}`)
+  if (r.notes) lines.push(...r.notes.map((n) => `≈ ${n}`))
   if (r.changes && r.changes.length) lines.push(`Δ ${r.changes.join('\n  ')}`)
   return lines.map((l) => prefix + l.split('\n').join('\n' + ' '.repeat(prefix.length))).join('\n')
 }

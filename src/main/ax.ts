@@ -22,7 +22,7 @@ interface AXNode {
 
 /** Roles that only add nesting noise; their children are lifted up */
 export const TRANSPARENT = new Set(['generic', 'none', 'presentation', 'InlineTextBox', 'LineBreak', 'group', 'Section', 'paragraph', 'LayoutTable', 'LayoutTableRow', 'LayoutTableCell'])
-const INTERACTIVE = new Set(['link', 'button', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'option', 'slider', 'treeitem', 'listbox', 'spinbutton'])
+const INTERACTIVE = new Set(['link', 'button', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'option', 'slider', 'treeitem', 'listbox', 'spinbutton', 'textField', 'PopUpButton', 'ToggleButton'])
 const MAX_LINES = 400
 
 /** Last snapshot's ref → DOM node, per webContents */
@@ -180,16 +180,24 @@ export interface AxQuery {
  * Finds the best visible node for role + accessible name: exact name first,
  * then prefix, then substring. Hidden duplicates (common in Gmail) are skipped.
  */
+/** Apps disagree on how to expose text fields: treat these roles as one family */
+const TEXT_FIELDS = new Set(['textbox', 'combobox', 'searchbox', 'textField'])
+const roleMatches = (want: string, actual: string): boolean => want === actual || (TEXT_FIELDS.has(want) && TEXT_FIELDS.has(actual))
+
+/** Case/whitespace-insensitive, and "1.5" == "1,5" (locale decimal separators) */
+const norm = (v: string): string => v.toLowerCase().replace(/\s+/g, ' ').replace(/(\d),(\d)/g, '$1.$2').trim()
+
 export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true): Promise<number | null> {
   const { nodes } = await cdp<{ nodes: AXNode[] }>(wc, 'Accessibility.getFullAXTree')
-  const want = q.name.toLowerCase().replace(/\s+/g, ' ').trim()
+  const want = norm(q.name)
   const scored: Array<{ id: number; score: number }> = []
   for (const n of nodes) {
     if (n.ignored || !n.backendDOMNodeId) continue
     const role = String(n.role?.value ?? '')
-    if (q.role && role !== q.role) continue
-    if (!q.role && (TRANSPARENT.has(role) || role === 'StaticText')) continue
-    const name = String(n.name?.value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    if (q.role && !roleMatches(q.role, role)) continue
+    // Without a role, plain text (placeholders, labels) is allowed but ranks below real controls
+    if (!q.role && TRANSPARENT.has(role)) continue
+    const name = norm(String(n.name?.value ?? ''))
     // Role-only query ("main", "dialog"): any node with that role
     if (!want && q.role) {
       scored.push({ id: n.backendDOMNodeId, score: 1 })
@@ -197,7 +205,8 @@ export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true)
     }
     if (!name) continue
     const score = name === want ? 3 : name.startsWith(want) ? 2 : name.includes(want) ? 1 : 0
-    if (score) scored.push({ id: n.backendDOMNodeId, score: score + (INTERACTIVE.has(role) ? 0.5 : 0) })
+    const exactRole = q.role && role === q.role ? 0.25 : 0
+    if (score) scored.push({ id: n.backendDOMNodeId, score: score + exactRole + (INTERACTIVE.has(role) ? 0.5 : role === 'StaticText' ? -0.5 : 0) })
   }
   scored.sort((a, b) => b.score - a.score)
   if (!requireVisible) return scored[0]?.id ?? null
@@ -210,7 +219,7 @@ export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true)
 }
 
 /** Names of nodes with this role (or all interactive ones) — shown when a lookup fails */
-export async function axCandidates(wc: WebContents, role?: string, query = '', limit = 8): Promise<string[]> {
+export async function axCandidates(wc: WebContents, role?: string, query = '', limit = 8, onlySimilar = false): Promise<string[]> {
   const { nodes } = await cdp<{ nodes: AXNode[] }>(wc, 'Accessibility.getFullAXTree')
   // Rank by shared word prefixes with the query, so near-misses come first
   const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2).map((w) => w.slice(0, 4))
@@ -219,7 +228,7 @@ export async function axCandidates(wc: WebContents, role?: string, query = '', l
   for (const n of nodes) {
     if (n.ignored) continue
     const r = String(n.role?.value ?? '')
-    if (role ? r !== role : !INTERACTIVE.has(r)) continue
+    if (role ? !roleMatches(role, r) : !INTERACTIVE.has(r)) continue
     const name = String(n.name?.value ?? '').replace(/\s+/g, ' ').trim()
     const label = `${r} "${name.slice(0, 60)}"`
     if (!name || seen.has(label)) continue
@@ -228,7 +237,7 @@ export async function axCandidates(wc: WebContents, role?: string, query = '', l
     scored.push({ label, score: words.filter((w) => lower.includes(w)).length })
   }
   if (words.length && scored.some((c) => c.score)) return scored.filter((c) => c.score).sort((a, b) => b.score - a.score).slice(0, limit).map((c) => c.label)
-  return scored.slice(0, limit).map((c) => c.label)
+  return onlySimilar ? [] : scored.slice(0, limit).map((c) => c.label)
 }
 
 /** Viewport centre of a DOM node, scrolled into view first */
