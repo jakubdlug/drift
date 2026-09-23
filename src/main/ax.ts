@@ -187,10 +187,11 @@ const roleMatches = (want: string, actual: string): boolean => want === actual |
 /** Case/whitespace-insensitive, and "1.5" == "1,5" (locale decimal separators) */
 const norm = (v: string): string => v.toLowerCase().replace(/\s+/g, ' ').replace(/(\d),(\d)/g, '$1.$2').trim()
 
-export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true): Promise<number | null> {
+/** All matching nodes, best first; the top score tier only (exact beats prefix beats substring) */
+export async function axFindAll(wc: WebContents, q: AxQuery, requireVisible = true): Promise<number[]> {
   const { nodes } = await cdp<{ nodes: AXNode[] }>(wc, 'Accessibility.getFullAXTree')
   const want = norm(q.name)
-  const scored: Array<{ id: number; score: number }> = []
+  const scored: Array<{ id: number; score: number; tier: number }> = []
   for (const n of nodes) {
     if (n.ignored || !n.backendDOMNodeId) continue
     const role = String(n.role?.value ?? '')
@@ -200,22 +201,30 @@ export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true)
     const name = norm(String(n.name?.value ?? ''))
     // Role-only query ("main", "dialog"): any node with that role
     if (!want && q.role) {
-      scored.push({ id: n.backendDOMNodeId, score: 1 })
+      scored.push({ id: n.backendDOMNodeId, score: 1, tier: 1 })
       continue
     }
     if (!name) continue
-    const score = name === want ? 3 : name.startsWith(want) ? 2 : name.includes(want) ? 1 : 0
+    const tier = name === want ? 3 : name.startsWith(want) ? 2 : name.includes(want) ? 1 : 0
+    if (!tier) continue
     const exactRole = q.role && role === q.role ? 0.25 : 0
-    if (score) scored.push({ id: n.backendDOMNodeId, score: score + exactRole + (INTERACTIVE.has(role) ? 0.5 : role === 'StaticText' ? -0.5 : 0) })
+    scored.push({ id: n.backendDOMNodeId, tier, score: tier + exactRole + (INTERACTIVE.has(role) ? 0.5 : role === 'StaticText' ? -0.5 : 0) })
   }
-  scored.sort((a, b) => b.score - a.score)
-  if (!requireVisible) return scored[0]?.id ?? null
+  if (!scored.length) return []
+  const bestTier = Math.max(...scored.map((c) => c.tier))
+  const top = scored.filter((c) => c.tier === bestTier).sort((a, b) => b.score - a.score)
+  if (!requireVisible) return top.map((c) => c.id)
   await cdp(wc, 'DOM.enable')
-  for (const c of scored.slice(0, 15)) {
+  const visible: number[] = []
+  for (const c of top.slice(0, 60)) {
     const { quads } = await cdp<{ quads: number[][] }>(wc, 'DOM.getContentQuads', { backendNodeId: c.id }).catch(() => ({ quads: [] }))
-    if (quads.length) return c.id
+    if (quads.length) visible.push(c.id)
   }
-  return null
+  return visible
+}
+
+export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true): Promise<number | null> {
+  return (await axFindAll(wc, q, requireVisible))[0] ?? null
 }
 
 /** Names of nodes with this role (or all interactive ones) — shown when a lookup fails */
@@ -241,6 +250,8 @@ export async function axCandidates(wc: WebContents, role?: string, query = '', l
 }
 
 /** Viewport centre of a DOM node, scrolled into view first */
+export { cdp }
+
 export async function nodePoint(wc: WebContents, backendNodeId: number): Promise<{ x: number; y: number; backendNodeId: number }> {
   await cdp(wc, 'DOM.enable')
   await cdp(wc, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }).catch(() => {})

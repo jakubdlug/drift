@@ -43,7 +43,8 @@ export class TabManager {
   }
 
   get activeView(): WebContentsView | null {
-    return this.attached ? (this.tabs.get(this.attached)?.view ?? null) : null
+    const view = this.attached ? (this.tabs.get(this.attached)?.view ?? null) : null
+    return view && !view.webContents.isDestroyed() ? view : null
   }
 
   get activeId(): ItemId | null {
@@ -201,6 +202,11 @@ export class TabManager {
       this.tabs.set(id, tab)
     }
     if (urlOverride) tab.info.url = urlOverride
+    // A view whose renderer is gone can't be shown again: drop it and rebuild
+    if (tab.view && tab.view.webContents.isDestroyed()) {
+      if (this.attached === id) this.attached = null
+      tab.view = null
+    }
     if (!tab.view) {
       tab.info.sleeping = false
       tab.view = this.createView(id, tab.info.url || item.url)
@@ -220,7 +226,11 @@ export class TabManager {
   /** Removes the visible tab view from the window without unloading it */
   detach(): void {
     const view = this.activeView
-    if (view) this.win.contentView.removeChildView(view)
+    try {
+      if (view) this.win.contentView.removeChildView(view)
+    } catch {
+      // Already destroyed together with its webContents
+    }
     this.attached = null
   }
 
@@ -229,7 +239,7 @@ export class TabManager {
     const tab = this.tabs.get(id)
     if (!tab) return
     if (this.attached === id) this.detach()
-    tab.view?.webContents.close()
+    if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close()
     this.tabs.delete(id)
     this.emit()
   }

@@ -4,7 +4,7 @@ import { writeFileSync } from 'fs'
 import { createServer } from 'http'
 import type { AddressInfo } from 'net'
 import { join } from 'path'
-import { axCandidates, axFind, axTree, nodePoint, refNode, ROLES } from './ax'
+import { axCandidates, axFind, axFindAll, axTree, cdp, nodePoint, refNode, ROLES } from './ax'
 
 /**
  * Local automation channel: lets a coding agent (or scripts/drift-ctl) read
@@ -207,8 +207,8 @@ async function resolve(wc: WebContents, raw: string, requireVisible = true): Pro
 }
 
 /** Resolves a selector to click coordinates plus a hit-test of that point */
-async function point(wc: WebContents, raw: string): Promise<{ x: number; y: number; backendNodeId?: number; hit: Extra['hit'] }> {
-  const r = await resolve(wc, raw)
+async function point(wc: WebContents, raw: string, node?: number): Promise<{ x: number; y: number; backendNodeId?: number; hit: Extra['hit'] }> {
+  const r: Resolved = node ? { kind: 'node', backendNodeId: node } : await resolve(wc, raw)
   if (r.kind === 'dom') {
     const x = Math.round(r.x)
     const y = Math.round(r.y)
@@ -219,6 +219,108 @@ async function point(wc: WebContents, raw: string): Promise<{ x: number; y: numb
   const y = Math.round(p.y)
   return { x, y, backendNodeId: r.backendNodeId, hit: await hitForRef(wc, r.backendNodeId, x, y) }
 }
+
+// ---------- scoping: --within / --near / --nth / --all ----------
+
+interface Scope {
+  within?: string
+  near?: string
+  nth?: number
+  all?: boolean
+}
+
+/** Backend node ids of DOM elements produced by a page expression returning an array */
+async function jsElements(wc: WebContents, expression: string): Promise<number[]> {
+  const { result } = await cdp<{ result: { objectId?: string } }>(wc, 'Runtime.evaluate', { expression, returnByValue: false })
+  if (!result.objectId) return []
+  const { result: props } = await cdp<{ result: Array<{ name: string; value?: { objectId?: string } }> }>(wc, 'Runtime.getProperties', {
+    objectId: result.objectId,
+    ownProperties: true
+  })
+  const ids: number[] = []
+  for (const pr of props) {
+    if (!/^\d+$/.test(pr.name) || !pr.value?.objectId) continue
+    const { node } = await cdp<{ node: { backendNodeId: number } }>(wc, 'DOM.describeNode', { objectId: pr.value.objectId })
+    ids.push(node.backendNodeId)
+  }
+  return ids
+}
+
+/** Every element a selector matches (visible ones for role/name lookups) */
+async function nodeList(wc: WebContents, raw: string): Promise<number[]> {
+  const s = parseSelector(raw)
+  await cdp(wc, 'DOM.enable')
+  if (s.ref) return [refNode(wc, s.ref)]
+  if (s.css) return jsElements(wc, `[...document.querySelectorAll(${JSON.stringify(s.css)})]`)
+  if (s.text)
+    // Smallest elements containing the text (not every ancestor up to <body>)
+    return jsElements(
+      wc,
+      `(() => { const w = ${JSON.stringify(s.text.toLowerCase())}; const has = (e) => (e.innerText || '').toLowerCase().includes(w);
+        return [...document.body.querySelectorAll('*')].filter((e) => has(e) && ![...e.children].some(has) && e.getClientRects().length) })()`
+    )
+  return axFindAll(wc, { role: s.role, name: s.name ?? '' })
+}
+
+/**
+ * Narrows target candidates: --within keeps descendants of the container, --near picks
+ * for each anchor the candidate sharing the deepest common ancestor (same card/row),
+ * --nth picks one, --all keeps one per anchor.
+ */
+async function scoped(wc: WebContents, raw: string, scope: Scope): Promise<number[]> {
+  let targets = await nodeList(wc, raw)
+  if (!targets.length) return []
+  const objects = async (ids: number[]): Promise<Array<{ objectId: string }>> =>
+    Promise.all(ids.map(async (backendNodeId) => ({ objectId: (await cdp<{ object: { objectId: string } }>(wc, 'DOM.resolveNode', { backendNodeId })).object.objectId })))
+
+  if (scope.within) {
+    const containers = await nodeList(wc, scope.within)
+    if (!containers.length) throw new Error(`--within: nie znaleziono ${scope.within}`)
+    const [container] = await objects([containers[0]])
+    const tObjs = await objects(targets)
+    const { result } = await cdp<{ result: { value: boolean[] } }>(wc, 'Runtime.callFunctionOn', {
+      objectId: container.objectId,
+      functionDeclaration: 'function (...els) { return els.map((e) => this.contains(e)) }',
+      arguments: tObjs,
+      returnByValue: true
+    })
+    targets = targets.filter((_, i) => result.value[i])
+  }
+
+  if (scope.near) {
+    const anchors = await nodeList(wc, scope.near)
+    if (!anchors.length) throw new Error(`--near: nie znaleziono ${scope.near}`)
+    const aObjs = await objects(anchors)
+    const tObjs = await objects(targets)
+    const { result } = await cdp<{ result: { value: number[] } }>(wc, 'Runtime.callFunctionOn', {
+      objectId: aObjs[0].objectId,
+      functionDeclaration: `function (nA, ...els) {
+        const anchors = els.slice(0, nA), targets = els.slice(nA);
+        const depth = (e) => { let d = 0; while (e) { d++; e = e.parentElement } return d };
+        const lca = (a, b) => { const seen = new Set(); for (let x = a; x; x = x.parentElement) seen.add(x); for (let y = b; y; y = y.parentElement) if (seen.has(y)) return y; return null };
+        return anchors.map((a) => {
+          let best = -1, bestD = -1;
+          targets.forEach((t, i) => { const c = lca(a, t); const d = c ? depth(c) : 0; if (d > bestD) { bestD = d; best = i } });
+          return best;
+        });
+      }`,
+      arguments: [{ value: anchors.length }, ...aObjs, ...tObjs],
+      returnByValue: true
+    })
+    const picked = [...new Set(result.value.filter((i) => i >= 0))].map((i) => targets[i])
+    targets = scope.all ? picked : picked.slice(0, 1)
+  }
+
+  if (!targets.length) return []
+  if (scope.nth) {
+    const one = targets[scope.nth - 1]
+    if (!one) throw new Error(`--nth ${scope.nth}: jest tylko ${targets.length} dopasowań`)
+    return [one]
+  }
+  return scope.all ? targets : targets.slice(0, 1)
+}
+
+const hasScope = (s: Scope): boolean => !!(s.within || s.near || s.nth || s.all)
 
 /** Marks the editable element at/inside a DOM node (the node itself, or an input in a wrapper) */
 const MARK_EDITABLE_FN = `function () {
@@ -234,8 +336,8 @@ const MARK_EDITABLE_FN = `function () {
 }`
 
 /** Like point(), but aims at the actual editable field, never a wrapper */
-async function editablePoint(wc: WebContents, raw: string): Promise<Awaited<ReturnType<typeof point>>> {
-  const r = await resolve(wc, raw)
+async function editablePoint(wc: WebContents, raw: string, node?: number): Promise<Awaited<ReturnType<typeof point>>> {
+  const r: Resolved = node ? { kind: 'node', backendNodeId: node } : await resolve(wc, raw)
   let marked = false
   if (r.kind === 'node') {
     const { object } = (await wc.debugger.sendCommand('DOM.resolveNode', { backendNodeId: r.backendNodeId })) as { object: { objectId: string } }
@@ -321,12 +423,55 @@ interface Condition {
 }
 
 function parseCondition(raw: string): Condition {
+  // Bare keys: "idle" (page settled) — optionally idle=<ms of quiet>
+  if (/^idle$/.test(raw.trim())) return { key: 'idle', op: '=', value: '500' }
   const m = raw.match(/^([\w.]+)\s*(!=|!~|=|~)\s*(.*)$/)
   if (!m) throw new Error(`Zły warunek "${raw}" — użyj klucz=wartość, klucz!=wartość, klucz~fragment albo klucz!~fragment`)
   return { key: m[1], op: m[2] as Condition['op'], value: m[3] }
 }
 
+/** Last time each page started a network request (for the idle condition) */
+const lastRequest = new WeakMap<WebContents, number>()
+
+async function trackNetwork(wc: WebContents): Promise<void> {
+  if (lastRequest.has(wc)) return
+  lastRequest.set(wc, Date.now())
+  await cdp(wc, 'Network.enable')
+  wc.debugger.on('message', (_e, method) => {
+    if (method === 'Network.requestWillBeSent') lastRequest.set(wc, Date.now())
+  })
+}
+
+/** Page settled: no new requests for `quietMs` and no DOM changes for 300 ms */
+async function isIdle(wc: WebContents, quietMs: number): Promise<boolean> {
+  await trackNetwork(wc)
+  if (Date.now() - (lastRequest.get(wc) ?? 0) < quietMs) return false
+  const sinceMutation = Number(
+    await wc
+      .executeJavaScript(
+        `(() => { if (!window.__driftMut) { window.__driftMut = performance.now(); new MutationObserver(() => (window.__driftMut = performance.now())).observe(document, { subtree: true, childList: true, characterData: true }) } return performance.now() - window.__driftMut })()`
+      )
+      .catch(() => 0)
+  )
+  return sinceMutation >= 300 && !wc.isLoading()
+}
+
 async function checkCondition(ctx: ControlContext, c: Condition, target: Target): Promise<boolean> {
+  if (c.key === 'idle') {
+    const wc = ctx.target(target)
+    return !!wc && (await isIdle(wc, Number(c.value) || 500))
+  }
+  if (c.key === 'heading') {
+    const wc = ctx.target(target)
+    if (!wc) return false
+    const text = String(
+      await wc
+        .executeJavaScript(`[...document.querySelectorAll('h1,h2,h3,[role=heading]')].filter((e) => e.getClientRects().length).map((e) => e.innerText).join('\\n')`)
+        .catch(() => '')
+    ).toLowerCase()
+    const has = c.op === '=' ? text.split('\n').some((l) => l.trim() === c.value.toLowerCase()) : text.includes(c.value.toLowerCase())
+    return c.op.startsWith('!') ? !has : has
+  }
   if (c.key === 'el') {
     const wc = ctx.target(target)
     if (!wc) return false
@@ -403,82 +548,125 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       item.click()
       return 'ok'
     }
-    case 'tree':
-      return await axTree(wc(), { all: !!p.all, filter: p.filter as string | undefined })
+    case 'tree': {
+      const target = wc()
+      const root = p.within ? await resolve(target, p.within as string, false) : null
+      if (root && root.kind !== 'node') throw new Error('--within dla tree wymaga selektora roli/nazwy albo ref')
+      return await axTree(target, {
+        all: !!p.all || !!root,
+        filter: p.filter as string | undefined,
+        rootBackendId: root?.kind === 'node' ? root.backendNodeId : undefined
+      })
+    }
     case 'text':
       return String(await wc().executeJavaScript('document.body.innerText')).slice(0, Number(p.limit ?? 8000))
     case 'eval':
       return await wc().executeJavaScript(p.code as string, true)
     case 'wait': {
-      const conds = ((p.conditions as string[]) ?? []).map(parseCondition)
-      if (!conds.length) throw new Error('Podaj warunki, np. mode=edge url~/watch selector=video')
+      // conditions: AND within a group, OR between groups ("a b | c")
+      const rawGroups = (p.conditions as unknown[]) ?? []
+      const groups = (rawGroups.length && Array.isArray(rawGroups[0]) ? (rawGroups as string[][]) : [rawGroups as string[]]).map((g) => g.map(parseCondition))
+      const failConds = ((p.fail as string[]) ?? []).map(parseCondition)
+      if (!groups.flat().length) throw new Error('Podaj warunki, np. mode=edge url~/watch el=button Wyślij idle')
       const timeout = Number(p.timeout ?? 5000)
       const start = Date.now()
+      const label = (c: Condition): string => (c.key === 'idle' ? 'idle' : `${c.key}${c.op}${c.value}`)
+      let last: boolean[][] = []
       while (true) {
-        const results = await Promise.all(conds.map((c) => checkCondition(ctx, c, targetName)))
-        if (results.every(Boolean)) return `spełnione po ${Date.now() - start} ms`
-        if (Date.now() - start > timeout) {
-          const failed = conds.filter((_, i) => !results[i])
-          const desc = failed.map((c) => `${c.key}${c.op}${c.value}${c.key === 'el' || c.key === 'text' || c.key === 'selector' ? '' : ` (jest: ${fmt(ctx.status()[c.key])})`}`)
-          // For a missing element, show what similar elements do exist (saves a lookup roundtrip)
-          const hints: string[] = []
-          for (const c of failed.filter((f) => f.key === 'el' && !f.op.startsWith('!'))) {
-            const t = ctx.target(targetName)
-            const q = parseSelector(c.value)
-            if (t && q.name !== undefined) hints.push(...(await axCandidates(t, q.role, q.name).catch(() => [])))
-          }
-          throw new Error(`timeout ${timeout} ms, niespełnione: ${desc.join(', ')}${hints.length ? `\n   podobne: ${hints.join(', ')}` : ''}`)
+        for (const f of failConds) {
+          if (await checkCondition(ctx, f, targetName)) throw new Error(`spełniony warunek porażki ${label(f)} po ${Date.now() - start} ms`)
         }
+        last = await Promise.all(groups.map((g) => Promise.all(g.map((c) => checkCondition(ctx, c, targetName)))))
+        const hit = last.findIndex((r) => r.every(Boolean))
+        if (hit >= 0) return `spełnione po ${Date.now() - start} ms${groups.length > 1 ? ` (gałąź ${hit + 1}: ${groups[hit].map(label).join(' ')})` : ''}`
+        if (Date.now() - start > timeout) break
         await sleep(50)
       }
+      const failed = groups.flatMap((g, gi) => g.filter((_, i) => !last[gi]?.[i]))
+      const desc = failed.map((c) => `${label(c)}${['el', 'text', 'selector', 'idle', 'heading'].includes(c.key) ? '' : ` (jest: ${fmt(ctx.status()[c.key])})`}`)
+      // For a missing element, show what similar elements do exist (saves a lookup roundtrip)
+      const hints: string[] = []
+      for (const c of failed.filter((f) => f.key === 'el' && !f.op.startsWith('!'))) {
+        const t = ctx.target(targetName)
+        const q = parseSelector(c.value)
+        if (t && q.name !== undefined) hints.push(...(await axCandidates(t, q.role, q.name).catch(() => [])))
+      }
+      throw new Error(`timeout ${timeout} ms, niespełnione: ${desc.join(', ')}${hints.length ? `\n   podobne: ${hints.join(', ')}` : ''}`)
     }
     case 'click':
     case 'hover':
     case 'fill': {
       let target = wc()
       const raw = (p.sel as string) ?? (p.ref ? String(p.ref) : p.selector ? `css:${p.selector}` : `text:${p.text}`)
-      const locate = (): ReturnType<typeof point> => (method === 'fill' ? editablePoint(target, raw) : point(target, raw))
-      let pt = await locate()
-      // Compact sidebar: slide it in instead of clicking into the void
-      if (targetName === 'sidebar' && !pt.hit?.ok && ctx.status().mode === 'edge') {
-        await ctx.revealSidebar()
-        target = wc()
-        pt = await locate()
+      const scope: Scope = { within: p.within as string, near: p.near as string, nth: p.nth ? Number(p.nth) : undefined, all: !!p.all }
+      // With a scope, candidates are picked up front; each is then clicked like a single target
+      let nodes: Array<number | undefined> = [undefined]
+      if (hasScope(scope)) {
+        const found = await scoped(target, raw, scope)
+        if (!found.length) {
+          const q = parseSelector(raw)
+          const hint = q.name !== undefined ? await axCandidates(target, q.role, q.name).catch(() => []) : []
+          throw new Error(`Nie znaleziono ${raw} w zawężeniu${hint.length ? `\n   podobne na stronie: ${hint.join(', ')}` : ''}`)
+        }
+        nodes = found
       }
-      // Menus and popovers often animate in: give an occluded target a moment to settle
-      for (let i = 0; i < 6 && pt.hit && !pt.hit.ok && pt.hit.hit !== 'nic'; i++) {
-        await sleep(120)
-        pt = await locate()
+      const done: string[] = []
+      for (const node of nodes) {
+        const locate = (): ReturnType<typeof point> => (method === 'fill' ? editablePoint(target, raw, node) : point(target, raw, node))
+        let pt = await locate()
+        // Compact sidebar: slide it in instead of clicking into the void
+        if (targetName === 'sidebar' && !pt.hit?.ok && ctx.status().mode === 'edge') {
+          await ctx.revealSidebar()
+          target = wc()
+          pt = await locate()
+        }
+        // Menus and popovers often animate in: give an occluded target a moment to settle
+        for (let i = 0; i < 6 && pt.hit && !pt.hit.ok && pt.hit.hit !== 'nic'; i++) {
+          await sleep(120)
+          pt = await locate()
+        }
+        // Hover-revealed controls (Keep, Gmail rows): move the mouse over first, then re-check
+        if (pt.hit && !pt.hit.ok && pt.hit.hit !== 'nic') {
+          target.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y })
+          await sleep(150)
+          pt = await locate()
+        }
+        extra.hit = pt.hit
+        const { x, y } = pt
+        if (extra.hit && !extra.hit.ok && !p.force) {
+          const offscreen = extra.hit.hit === 'nic'
+          throw new Error(
+            (done.length ? `(${done.length} z ${nodes.length} wykonane) ` : '') +
+              (offscreen
+                ? `Cel ${extra.hit.target} jest poza widokiem (@${x},${y}) — nie klikam (--force wymusza)`
+                : `Cel ${extra.hit.target} jest zasłonięty przez ${extra.hit.hit} — nie klikam (--force wymusza)`)
+          )
+        }
+        target.sendInputEvent({ type: 'mouseMove', x, y })
+        if (method === 'hover') {
+          done.push(`mysz @${x},${y}`)
+          continue
+        }
+        const button = (p.button as 'left' | 'right' | 'middle') ?? 'left'
+        const base = { x, y, button, modifiers: mods(p.modifiers as Modifier[]) }
+        target.sendInputEvent({ ...base, type: 'mouseDown', clickCount: 1 })
+        target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 1 })
+        if (p.double) {
+          target.sendInputEvent({ ...base, type: 'mouseDown', clickCount: 2 })
+          target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 2 })
+        }
+        if (method === 'click') done.push(`klik @${x},${y}`)
+        else done.push(await fillFocused(target, String(p.value ?? '')))
+        if (nodes.length > 1) await sleep(80)
       }
-      extra.hit = pt.hit
-      const { x, y } = pt
-      if (extra.hit && !extra.hit.ok && !p.force) {
-        const offscreen = extra.hit.hit === 'nic'
-        throw new Error(
-          offscreen
-            ? `Cel ${extra.hit.target} jest poza widokiem (@${x},${y}) — nie klikam (--force wymusza)`
-            : `Cel ${extra.hit.target} jest zasłonięty przez ${extra.hit.hit} — nie klikam (--force wymusza)`
-        )
-      }
-      target.sendInputEvent({ type: 'mouseMove', x, y })
-      if (method === 'hover') return `mysz @${x},${y}`
-      const button = (p.button as 'left' | 'right' | 'middle') ?? 'left'
-      const base = { x, y, button, modifiers: mods(p.modifiers as Modifier[]) }
-      target.sendInputEvent({ ...base, type: 'mouseDown', clickCount: 1 })
-      target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 1 })
-      if (p.double) {
-        target.sendInputEvent({ ...base, type: 'mouseDown', clickCount: 2 })
-        target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 2 })
-      }
-      if (method === 'click') return `klik @${x},${y}`
-      return await fillFocused(target, String(p.value ?? ''))
+      return nodes.length > 1 ? `${done.length}×: ${done.join(', ')}` : done[0]
     }
     case 'snapshot': {
       const target = wc()
       // Containers (regions, dialogs) often have no box of their own: skip the visibility check
       const r = await resolve(target, p.sel as string, false)
       if (r.kind !== 'node') throw new Error('snapshot wymaga selektora roli/nazwy albo ref')
-      return await axTree(target, { all: true, rootBackendId: r.backendNodeId })
+      return await axTree(target, { all: true, rootBackendId: r.backendNodeId, filter: p.filter as string | undefined })
     }
     case 'open': {
       const fn = ctx.actions['open-by-name']

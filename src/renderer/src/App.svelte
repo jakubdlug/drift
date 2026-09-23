@@ -118,6 +118,21 @@
       <div class="panel"><Sidebar {snap} bind:renaming bind:editingWorkspace onpalette={openPalette} /></div>
     {/if}
 
+    {#if !snap.hasPage && snap.mode !== 'full'}
+      {@const ws = workspace(snap)}
+      <div class="empty" style="left:{overlay ? 8 : width}px">
+        <div class="empty-card">
+          <div class="empty-emoji">{ws.emoji ?? '✨'}</div>
+          <div class="empty-title">{ws.name}</div>
+          <div class="empty-sub">Brak otwartej karty w tym workspace</div>
+          <div class="empty-actions">
+            <button onclick={() => openPalette('new')}>Nowa karta <kbd>⌘T</kbd></button>
+            {#if overlay}<button onclick={actions.toggleCompact}>Pokaż sidebar <kbd>⌘S</kbd></button>{/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if palette}
       {#key palette}
         <Palette {snap} mode={palette} onclose={closePalette} />
@@ -136,10 +151,35 @@
     border-radius: 0 12px 12px 0;
     overflow: hidden;
     box-shadow: 6px 0 24px rgba(0, 0, 0, 0.45);
+    z-index: 5;
     transform: translateX(calc(-100% - 28px));
     transition: transform 140ms cubic-bezier(0.4, 0, 1, 1);
     will-change: transform;
   }
+  .empty {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: rgba(var(--fg-rgb), 0.04);
+    border: 1px solid rgba(var(--fg-rgb), 0.08);
+  }
+  .empty-card { text-align: center; }
+  .empty-emoji { font-size: 40px; margin-bottom: 8px; }
+  .empty-title { font-size: 18px; font-weight: 600; }
+  .empty-sub { margin-top: 4px; color: var(--dim); }
+  .empty-actions { margin-top: 18px; display: flex; gap: 8px; justify-content: center; }
+  .empty-actions button {
+    padding: 8px 14px;
+    border-radius: 9px;
+    background: var(--tile);
+    border: 1px solid rgba(var(--fg-rgb), 0.1);
+  }
+  .empty-actions button:hover { background: var(--active); }
+  kbd { margin-left: 6px; color: var(--dim); font: inherit; font-size: 12px; }
   .overlay.open {
     transform: none;
     transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);

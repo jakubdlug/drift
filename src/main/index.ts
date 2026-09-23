@@ -29,6 +29,14 @@ async function acquireInstanceLock(): Promise<boolean> {
 
 // Watchers and scripts stop us with SIGTERM; quit properly so state gets flushed
 process.on('SIGTERM', () => app.quit())
+// A failing handler must not leave the window half-updated: log, then re-sync the UI
+process.on('unhandledRejection', (err) => {
+  console.error('Nieobsłużony błąd:', err)
+  try {
+    layout()
+    push()
+  } catch {}
+})
 
 app.on('second-instance', (_e, argv) => {
   if (!win) return
@@ -42,6 +50,8 @@ let chrome: WebContentsView
 let tabs: TabManager
 let store: Store
 let mode: ChromeMode = 'docked'
+/** Workspace used before the current one: where deleting a workspace returns to */
+let previousWorkspaceId: string | null = null
 /** A page (e.g. a video) requested fullscreen: the tab covers the whole window */
 let htmlFullscreen = false
 let fullscreenedForPage = false
@@ -80,7 +90,8 @@ function layout(): void {
     peek: { x: 0, y: 0, width: sw + PEEK_SHADOW, height: h },
     full: { x: 0, y: 0, width: w, height: h }
   }[mode]
-  chrome.setBounds(chromeBounds)
+  // No page to show (empty workspace): the sidebar view draws an empty state over the whole window
+  chrome.setBounds(tabs.activeView ? chromeBounds : { x: 0, y: 0, width: w, height: h })
 
   const left = Math.round(gap + (sw - gap) * reveal)
   tabs.activeView?.setBounds({ x: left, y: gap, width: Math.max(0, w - left - gap), height: Math.max(0, h - gap * 2) })
@@ -150,7 +161,7 @@ function push(): void {
   pushTimer = setTimeout(() => {
     pushTimer = null
     if (chrome.webContents.isDestroyed()) return
-    const snapshot: Snapshot = { state: store.state, tabs: tabs.runtime(), mode }
+    const snapshot: Snapshot = { state: store.state, tabs: tabs.runtime(), mode, hasPage: !!tabs.activeView }
     chrome.webContents.send('snapshot', snapshot)
     win.setBackgroundColor(store.activeWorkspace.color)
   }, 8)
@@ -211,6 +222,7 @@ function switchWorkspace(id: string): void {
   if (!store.workspace(id) || id === store.state.activeWorkspaceId) return
   closeFind()
   tabs.detach()
+  previousWorkspaceId = store.state.activeWorkspaceId
   store.state.activeWorkspaceId = id
   store.changed()
   const active = activeItemId()
@@ -368,14 +380,32 @@ function workspaceMenu(id: string): void {
           buttons: ['Anuluj', 'Usuń'],
           defaultId: 0
         })
-        if (response !== 1) return
-        for (const itemId of [...ws.pinned, ...ws.today]) for (const r of store.remove(itemId)) tabs.close(r)
-        if (store.state.activeWorkspaceId === ws.id) cycleWorkspace(1)
-        store.state.workspaces = store.state.workspaces.filter((w) => w.id !== ws.id)
-        store.changed()
+        if (response === 1) deleteWorkspace(ws.id)
       }
     }
   ]).popup({ window: win })
+}
+
+/** Removes a workspace; if it was active, moves to a neighbour first so the view is never left empty */
+function deleteWorkspace(id: string): void {
+  const list = store.state.workspaces
+  const index = list.findIndex((w) => w.id === id)
+  if (index < 0 || list.length < 2) return
+  const ws = list[index]
+  if (store.state.activeWorkspaceId === id) {
+    const fallback = list.find((w) => w.id === previousWorkspaceId && w.id !== id) ?? list[index - 1] ?? list[index + 1]
+    try {
+      switchWorkspace(fallback.id)
+    } catch (err) {
+      console.error('Przełączenie workspace nie powiodło się:', err)
+      store.state.activeWorkspaceId = fallback.id
+    }
+  }
+  for (const itemId of [...ws.pinned, ...ws.today]) for (const r of store.remove(itemId)) tabs.close(r)
+  store.state.workspaces = store.state.workspaces.filter((w) => w.id !== id)
+  delete store.state.activeItemByWorkspace[id]
+  store.changed()
+  layout()
 }
 
 function newWorkspace(): void {
@@ -429,7 +459,7 @@ function registerIpc(): void {
     handlers[channel] = fn as (...a: unknown[]) => unknown
     ipcMain.handle(channel, (_e, ...args) => handlers[channel](...args))
   }
-  on('snapshot', () => ({ state: store.state, tabs: tabs.runtime(), mode }) satisfies Snapshot)
+  on('snapshot', () => ({ state: store.state, tabs: tabs.runtime(), mode, hasPage: !!tabs.activeView }) satisfies Snapshot)
   on('open-item', (id: ItemId) => openItem(id))
   on('new-tab', (input: string) => newTab(input))
   on('navigate', (input: string) => {
@@ -457,6 +487,7 @@ function registerIpc(): void {
     store.changed()
   })
   on('workspace-menu', (id: string) => workspaceMenu(id))
+  on('delete-workspace', (id: string) => deleteWorkspace(id))
   on('item-menu', (id: ItemId) => itemMenu(id))
   on('set-mode', (next: ChromeMode) => setMode(next))
   on('palette', (open: boolean) => (open ? setMode('full') : applyCompact()))

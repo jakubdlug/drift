@@ -13,12 +13,23 @@ target: sidebar (domyślnie) | page | find
   state                         stan: workspace, aktywna karta, pinned/today
   status                        płaski status (mode, url, peekOpen, palette, focus…)
   open <nazwa>                  otwórz kartę po tytule/URL (Essentials, pinned, Today, inne workspace'y)
-  wait [target] <warunek…>      klucz=wart | klucz!=wart | klucz~frag | klucz!~frag | el=<sel> | text~<tekst>
-                                | selector=<css>; --timeout ms (domyślnie 5000)
-  tree [target]                 drzewo dostępności z [ref] (--all, --filter tekst)
-  snapshot <target> <sel>       drzewo jednego fragmentu, np. dialog "Nowa wiadomość"
+  wait [target] <warunki>       czekaj aż spełnione (AND); "a b | c" = (a i b) albo c
+                                klucz=wart, klucz!=wart, klucz~frag, klucz!~frag (klucze ze status)
+                                el=<sel> / el!=<sel>   element widoczny / zniknął
+                                text~<tekst>           tekst na stronie;  heading~<tekst> nagłówek
+                                idle / idle=<ms>       brak nowych żądań i zmian DOM (zamiast title~)
+                                --fail "<warunki>"     przerwij od razu, gdy któryś zajdzie
+                                --timeout ms (domyślnie 5000)
+  tree [target]                 drzewo dostępności z [ref] (--all poza widokiem, --filter, --within <sel>)
+  snapshot <target> <sel>       drzewo jednego fragmentu, np. dialog (--filter)
   click <target> <sel>          klik (--right, --double, --mod cmd,shift, --force)
   fill <target> <sel> <tekst>   klik w pole, zastąp zawartość, wpisz
+
+  zawężanie (click/hover/fill):
+    --within <sel>              tylko wewnątrz kontenera, np. --within dialog
+    --near <sel>                element najbliższy kotwicy (ta sama karta/wiersz)
+    --all                       z --near: po jednym przy każdej kotwicy; bez: wszystkie dopasowania
+    --nth N                     N-te dopasowanie
   hover <target> <sel>          najechanie myszą
   mouse <target> <x> <y>        przesuń mysz do współrzędnych widoku
   type <target> <tekst>         wpisz tekst w element z fokusem
@@ -36,7 +47,7 @@ Komendy zmieniające stan same raportują: zmiany statusu (Δ), co trafił klik 
 i nowe błędy (✖). Restart Drifta między komendami jest sygnalizowany (⚠).`
 
 const BOOL_FLAGS = new Set(['right', 'double', 'clear', 'all', 'json', 'force'])
-const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter'])
+const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter', 'within', 'near', 'nth', 'fail'])
 const TARGETS = ['sidebar', 'page', 'find']
 const MUTATING = new Set(['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse', 'fill', 'open'])
 
@@ -93,30 +104,34 @@ function buildRequest({ cmd, rest, flags }) {
   const takeTarget = () => (TARGETS.includes(r[0]) ? r.shift() : 'sidebar')
   const modifiers = flags.mod ? flags.mod.split(',') : undefined
   const sel = () => (flags.sel ? `css:${flags.sel}` : r.join(' '))
+  const scope = { within: flags.within, near: flags.near, nth: flags.nth ? Number(flags.nth) : undefined, all: !!flags.all }
+  // Values may contain spaces ("el=textbox Treść wiadomości"): split only before the next key= / bare idle
+  const splitConds = (text) => text.split(/\s+(?=(?:[\w.]+\s*(?:!=|!~|=|~)|idle(?:\s|$)))/).map((c) => c.trim()).filter(Boolean)
   switch (cmd) {
     case 'tree':
-      return { method: 'tree', params: { target: takeTarget(), all: !!flags.all, filter: flags.filter } }
+      return { method: 'tree', params: { target: takeTarget(), all: !!flags.all, filter: flags.filter, within: flags.within } }
     case 'text':
       return { method: 'text', params: { target: takeTarget() } }
     case 'wait': {
       const target = takeTarget()
-      // Values may contain spaces ("el=textbox Treść wiadomości"): split only before the next key=
-      const conditions = r.join(' ').split(/\s+(?=[\w.]+\s*(?:!=|!~|=|~))/).filter(Boolean)
-      return { method: 'wait', params: { target, conditions, timeout: flags.timeout ? Number(flags.timeout) : undefined } }
+      // "a b | c d": all of a+b, or all of c+d
+      const conditions = r.join(' ').split(/\s+\|\s+/).map(splitConds)
+      const fail = flags.fail ? splitConds(flags.fail) : undefined
+      return { method: 'wait', params: { target, conditions, fail, timeout: flags.timeout ? Number(flags.timeout) : undefined } }
     }
     case 'click':
     case 'hover': {
       const target = takeTarget()
-      return { method: cmd, params: { target, sel: sel(), button: flags.right ? 'right' : 'left', double: !!flags.double, force: !!flags.force, modifiers } }
+      return { method: cmd, params: { target, sel: sel(), button: flags.right ? 'right' : 'left', double: !!flags.double, force: !!flags.force, modifiers, ...scope } }
     }
     case 'fill': {
       const target = takeTarget()
       const value = r.pop()
-      return { method: 'fill', params: { target, sel: flags.sel ? `css:${flags.sel}` : r.join(' '), value, force: !!flags.force } }
+      return { method: 'fill', params: { target, sel: flags.sel ? `css:${flags.sel}` : r.join(' '), value, force: !!flags.force, ...scope } }
     }
     case 'snapshot': {
       const target = takeTarget()
-      return { method: 'snapshot', params: { target, sel: sel() } }
+      return { method: 'snapshot', params: { target, sel: sel(), filter: flags.filter } }
     }
     case 'open':
       return { method: 'open', params: { name: r.join(' ') } }

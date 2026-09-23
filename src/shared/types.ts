@@ -102,4 +102,6 @@ export interface Snapshot {
   state: State
   tabs: Record<ItemId, RuntimeTab>
   mode: ChromeMode
+  /** A tab is attached and visible; false = empty workspace, render an empty state */
+  hasPage: boolean
 }
