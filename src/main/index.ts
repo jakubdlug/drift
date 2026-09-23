@@ -422,7 +422,8 @@ function newWorkspace(): void {
   store.state.workspaces.push(ws)
   store.changed()
   switchWorkspace(ws.id)
-  chrome.webContents.send('command', { type: 'edit-workspace', id: ws.id })
+  // After the snapshot with the new workspace has reached the sidebar (push is debounced)
+  setTimeout(() => chrome.webContents.send('command', { type: 'edit-workspace', id: ws.id }), 60)
 }
 
 function tidyToday(): void {
@@ -462,9 +463,9 @@ function registerIpc(): void {
   on('snapshot', () => ({ state: store.state, tabs: tabs.runtime(), mode, hasPage: !!tabs.activeView }) satisfies Snapshot)
   on('open-item', (id: ItemId) => openItem(id))
   on('new-tab', (input: string) => newTab(input))
-  on('navigate', (input: string) => {
+  on('navigate', (input: string, force = false) => {
     const id = activeItemId()
-    if (id) tabs.navigate(id, normaliseInput(input))
+    if (id) tabs.navigate(id, normaliseInput(input), force)
     else newTab(input)
   })
   on('nav', (action: 'back' | 'forward' | 'reload') => {
@@ -805,6 +806,10 @@ app.whenReady().then(async () => {
       summary: controlSummary,
       status: controlStatus,
       seq: () => seq,
+      guardUnload: (on: boolean) => {
+        tabs.quietUnload = on
+      },
+      unloadBlockedSince: (t: number) => (tabs.lastUnloadBlock?.at ?? 0) >= t,
       revealSidebar: async () => {
         chrome.webContents.send('command', { type: 'peek' })
         const until = Date.now() + 1500

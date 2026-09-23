@@ -102,8 +102,11 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
   const map = new Map<number, number>()
   refs.set(wc, map)
   const lines: string[] = []
+  const depths: number[] = []
   const base = wc.getURL()
   const filter = opts.filter?.toLowerCase()
+  // Searching makes no sense limited to the viewport
+  if (filter) opts = { ...opts, all: true }
 
   const visible = (n: AXNode): boolean => {
     if (opts.all || !n.backendDOMNodeId) return true
@@ -143,7 +146,10 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
           if (p.name === 'disabled' && on) line += ' (disabled)'
         }
         if (role === 'link' && n.backendDOMNodeId && hrefs.has(n.backendDOMNodeId)) line += ` → ${shortHref(hrefs.get(n.backendDOMNodeId)!, base)}`
-        if (!filter || line.toLowerCase().includes(filter)) lines.push(line)
+        if (!filter || line.toLowerCase().includes(filter)) {
+          lines.push(line)
+          depths.push(depth)
+        }
         childDepth = depth + 1
         // Interactive elements are leaves: their inner text is already the name
         if (interactive && name) return
@@ -155,8 +161,13 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
   const root = opts.rootBackendId ? nodes.find((n) => n.backendDOMNodeId === opts.rootBackendId) : nodes[0]
   if (!root) throw new Error('Nie znaleziono węzła do snapshotu')
   walk(root.nodeId, 0)
-  if (lines.length >= MAX_LINES) lines.push(`… ucięto po ${MAX_LINES} liniach (użyj --filter)`)
-  return lines.join('\n') || '(pusto — brak elementów w widoku)'
+  let out = lines
+  if (filter) {
+    // Keep only the deepest match of each branch: row > cell > checkbox all repeat the same text
+    out = lines.filter((_, i) => !(i + 1 < lines.length && depths[i + 1] > depths[i])).map((l) => l.trimStart())
+  }
+  if (lines.length >= MAX_LINES) out.push(`… ucięto po ${MAX_LINES} liniach (zawęź --filter)`)
+  return out.join('\n') || (filter ? `(brak elementów zawierających "${opts.filter}")` : '(pusto — brak elementów w widoku)')
 }
 
 export function refNode(wc: WebContents, ref: number): number {
@@ -245,7 +256,7 @@ export async function axCandidates(wc: WebContents, role?: string, query = '', l
     const lower = name.toLowerCase()
     scored.push({ label, score: words.filter((w) => lower.includes(w)).length })
   }
-  if (words.length && scored.some((c) => c.score)) return scored.filter((c) => c.score).sort((a, b) => b.score - a.score).slice(0, limit).map((c) => c.label)
+  if (words.length) return scored.filter((c) => c.score).sort((a, b) => b.score - a.score).slice(0, limit).map((c) => c.label)
   return onlySimilar ? [] : scored.slice(0, limit).map((c) => c.label)
 }
 

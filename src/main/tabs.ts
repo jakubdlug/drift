@@ -1,4 +1,4 @@
-import { app, BaseWindow, WebContentsView, session, shell, type Session } from 'electron'
+import { app, BaseWindow, dialog, WebContentsView, session, shell, type Session } from 'electron'
 import { existsSync } from 'fs'
 import { join, parse } from 'path'
 import { showPageMenu } from './page-menu'
@@ -21,6 +21,11 @@ export class TabManager {
   private attached: ItemId | null = null
   private sessions = new Set<Session>()
   private emitTimer: NodeJS.Timeout | null = null
+  /** Tabs whose next beforeunload prompt is skipped (forced navigation) */
+  private forceUnload = new Set<ItemId>()
+  /** Automation in progress: never pop a blocking dialog, just record the refusal */
+  quietUnload = false
+  lastUnloadBlock: { id: ItemId; at: number } | null = null
 
   constructor(
     private win: BaseWindow,
@@ -147,6 +152,26 @@ export class TabManager {
         searchUrl: this.store.state.settings.searchUrl
       })
     )
+    // Pages with unsaved changes (beforeunload): Electron silently cancels by default — ask like Chrome does
+    wc.on('will-prevent-unload', (e) => {
+      if (this.forceUnload.delete(id)) {
+        e.preventDefault()
+        return
+      }
+      if (this.quietUnload) {
+        this.lastUnloadBlock = { id, at: Date.now() }
+        return
+      }
+      const choice = dialog.showMessageBoxSync(this.win, {
+        type: 'question',
+        buttons: ['Zostań', 'Opuść stronę'],
+        defaultId: 0,
+        cancelId: 0,
+        message: 'Opuścić tę stronę?',
+        detail: 'Wprowadzone zmiany mogą nie zostać zapisane.'
+      })
+      if (choice === 1) e.preventDefault()
+    })
     wc.on('enter-html-full-screen', () => this.hooks.htmlFullscreen(true))
     wc.on('leave-html-full-screen', () => this.hooks.htmlFullscreen(false))
     wc.on('found-in-page', (_e, result) => this.hooks.onFound(result))
@@ -271,7 +296,8 @@ export class TabManager {
     return id ? (this.tabs.get(id)?.view?.webContents ?? null) : null
   }
 
-  navigate(id: ItemId, url: string): void {
+  navigate(id: ItemId, url: string, force = false): void {
+    if (force) this.forceUnload.add(id)
     this.show(id, url)
   }
 

@@ -89,6 +89,8 @@ snapshot page region "Temat maila"
 EOF
 ```
 
+Zawężanie: `--within <sel>` (tylko w kontenerze), `--near <sel>` (element najbliższy kotwicy — ta sama karta/wiersz), `--all`, `--nth N`. Warunki `wait`: `idle` (strona się uspokoiła — pewniejsze niż tytuł w SPA), `heading~`, alternatywa `a | b`, `--fail "<warunek>"`. Zmienne w `run`: `extract page /regex/ --as ids`, potem `${ids[0]}`, `${ids|lines|url}`. `goto <url>` sprawdza, że strona faktycznie się otworzyła (`--new`, `--force`).
+
 Każda komenda zmieniająca stan sama raportuje:
 - `Δ` — co zmieniło się w statusie (tryb, URL, paleta, fokus…),
 - `→ trafiono` — element, który faktycznie dostał klik; zasłonięty lub niewidoczny cel jest blokowany (`--force` wymusza),

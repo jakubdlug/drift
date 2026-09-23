@@ -41,6 +41,14 @@
   // Compact mode: the overlay stays mounted and only slides, so hovering the edge is instant
   let peekOpen = $state(false)
 
+  // Edits of things that no longer exist (deleted workspace, removed item) must not keep the sidebar pinned open
+  $effect(() => {
+    const st = app.snap?.state
+    if (!st) return
+    if (editingWorkspace && !st.workspaces.some((w) => w.id === editingWorkspace)) editingWorkspace = null
+    if (renaming && !st.items[renaming]) renaming = null
+  })
+
   // Docking (⌘S) ends any peek; a stale "open" would break the next hover
   $effect(() => {
     if (app.snap?.mode === 'docked') peekOpen = false
@@ -59,7 +67,9 @@
     if (hideTimer || !peekOpen) return
     hideTimer = setTimeout(() => {
       hideTimer = undefined
-      if (!renaming && !editingWorkspace) peekOpen = false
+      // Only a form that is actually on screen keeps the panel open
+      const editingHere = editingWorkspace && editingWorkspace === app.snap?.state.activeWorkspaceId
+      if (!renaming && !editingHere) peekOpen = false
     }, 80)
   }
 

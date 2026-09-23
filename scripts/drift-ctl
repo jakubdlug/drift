@@ -13,6 +13,9 @@ target: sidebar (domyślnie) | page | find
   state                         stan: workspace, aktywna karta, pinned/today
   status                        płaski status (mode, url, peekOpen, palette, focus…)
   open <nazwa>                  otwórz kartę po tytule/URL (Essentials, pinned, Today, inne workspace'y)
+  goto <url>                    przejdź na adres i upewnij się, że strona tam została (retry)
+                                --new w nowej karcie; --force mimo "niezapisanych zmian" strony
+  extract <target> /regex/      dopasowania z tekstu strony (--limit N, --as zmienna)
   wait [target] <warunki>       czekaj aż spełnione (AND); "a b | c" = (a i b) albo c
                                 klucz=wart, klucz!=wart, klucz~frag, klucz!~frag (klucze ze status)
                                 el=<sel> / el!=<sel>   element widoczny / zniknął
@@ -42,14 +45,16 @@ target: sidebar (domyślnie) | page | find
   logs [--clear]                logi konsoli sidebara i paska wyszukiwania
   run [plik]                    wykonaj skrypt (jedna komenda na linię, # komentarz)
                                 w JEDNYM zapytaniu; stop na pierwszym błędzie
+                                zmienne: extract/eval --as ids, potem \${ids} \${ids[0]}
+                                \${ids|lines} \${ids|join:; } \${ids|lines|url}
 
 Komendy zmieniające stan same raportują: zmiany statusu (Δ), co trafił klik (→)
 i nowe błędy (✖). Restart Drifta między komendami jest sygnalizowany (⚠).`
 
-const BOOL_FLAGS = new Set(['right', 'double', 'clear', 'all', 'json', 'force'])
-const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter', 'within', 'near', 'nth', 'fail'])
+const BOOL_FLAGS = new Set(['right', 'double', 'clear', 'all', 'json', 'force', 'new'])
+const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter', 'within', 'near', 'nth', 'fail', 'as', 'limit'])
 const TARGETS = ['sidebar', 'page', 'find']
-const MUTATING = new Set(['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse', 'fill', 'open'])
+const MUTATING = new Set(['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse', 'fill', 'open', 'goto'])
 
 /** Shell-like tokenizer for script lines: "..." and '...' group words, quotes are stripped */
 function tokenize(line) {
@@ -135,6 +140,12 @@ function buildRequest({ cmd, rest, flags }) {
     }
     case 'open':
       return { method: 'open', params: { name: r.join(' ') } }
+    case 'goto':
+      return { method: 'goto', params: { url: r[0], new: !!flags.new, force: !!flags.force, timeout: flags.timeout ? Number(flags.timeout) : undefined } }
+    case 'extract': {
+      const target = takeTarget()
+      return { method: 'extract', params: { target, pattern: r.join(' '), limit: flags.limit, as: flags.as } }
+    }
     case 'mouse': {
       const target = takeTarget()
       return { method: 'mouse', params: { target, x: r[0], y: r[1] } }
@@ -153,7 +164,7 @@ function buildRequest({ cmd, rest, flags }) {
       return { method: 'action', params: { name: r[0], args: r.slice(1).map(parseValue) } }
     case 'eval': {
       const target = takeTarget()
-      return { method: 'eval', params: { target, code: r.join(' ') } }
+      return { method: 'eval', params: { target, code: r.join(' '), as: flags.as } }
     }
     case 'screenshot': {
       const target = takeTarget()

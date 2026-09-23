@@ -27,6 +27,9 @@ export interface ControlContext {
   summary: () => unknown
   status: () => Status
   seq: () => number
+  /** Automation mode for beforeunload prompts: record instead of showing a blocking dialog */
+  guardUnload: (on: boolean) => void
+  unloadBlockedSince: (t: number) => boolean
   /** Slides the compact sidebar in so its elements can be clicked */
   revealSidebar: () => Promise<void>
 }
@@ -518,7 +521,7 @@ function findMenuItem(items: MenuItem[], label: string): MenuItem | null {
 }
 
 /** Commands that change something get an automatic before/after report */
-const MUTATING = new Set(['action', 'menu', 'click', 'hover', 'mouse', 'type', 'key', 'fill', 'open'])
+const MUTATING = new Set(['action', 'menu', 'click', 'hover', 'mouse', 'type', 'key', 'fill', 'open', 'goto'])
 
 interface Extra {
   hit?: { ok: boolean; hit: string; target: string | null }
@@ -668,6 +671,49 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       if (r.kind !== 'node') throw new Error('snapshot wymaga selektora roli/nazwy albo ref')
       return await axTree(target, { all: true, rootBackendId: r.backendNodeId, filter: p.filter as string | undefined })
     }
+    case 'goto': {
+      // Navigate and make sure we actually end up there: SPAs redirect, pages refuse to unload
+      const want = new URL(String(p.url))
+      if (p.new) {
+        await ctx.actions['new-tab'](want.toString())
+      }
+      const matches = (): boolean => {
+        try {
+          const now = new URL(String(ctx.status().url ?? ''))
+          return now.host === want.host && now.pathname.replace(/\/$/, '') === want.pathname.replace(/\/$/, '')
+        } catch {
+          return false
+        }
+      }
+      ctx.guardUnload(true)
+      try {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const started = Date.now()
+          if (!p.new || attempt > 1) await ctx.actions['navigate'](want.toString(), !!p.force)
+          const until = Date.now() + Number(p.timeout ?? 8000)
+          while (Date.now() < until && !matches()) {
+            if (ctx.unloadBlockedSince(started))
+              throw new Error('Strona blokuje opuszczenie (beforeunload — niezapisane zmiany?). Dokończ/zapisz, użyj --new albo --force')
+            await sleep(50)
+          }
+          await sleep(400)
+          if (matches()) return attempt > 1 ? 'ok (za drugim razem — strona przekierowała)' : 'ok'
+        }
+      } finally {
+        ctx.guardUnload(false)
+      }
+      throw new Error(`Nie udało się otworzyć ${want} — jest ${ctx.status().url}`)
+    }
+    case 'extract': {
+      // Regex over the page text; the result can feed later steps of a run via --as
+      const text = String(await wc().executeJavaScript('document.body.innerText'))
+      const m = String(p.pattern).match(/^\/(.+)\/([a-z]*)$/)
+      const re = new RegExp(m ? m[1] : String(p.pattern), (m?.[2] ?? '').replace('g', '') + 'g')
+      const found = [...new Set([...text.matchAll(re)].map((x) => x[1] ?? x[0]))]
+      const limited = p.limit ? found.slice(0, Number(p.limit)) : found
+      if (!limited.length) throw new Error(`Brak dopasowań ${re}`)
+      return limited
+    }
     case 'open': {
       const fn = ctx.actions['open-by-name']
       return await fn(p.name)
@@ -705,15 +751,51 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       return out.join('\n')
     }
     default:
-      throw new Error('Metody: state, status, action, menu, open, tree, snapshot, text, eval, wait, click, hover, fill, mouse, type, key, screenshot, logs, batch')
+      throw new Error('Metody: state, status, action, menu, open, goto, tree, snapshot, text, extract, eval, wait, click, hover, fill, mouse, type, key, screenshot, logs, batch')
   }
+}
+
+/**
+ * ${name}, ${name[0]}, ${name|lines}, ${name|lines|url}: values captured with --as earlier in the run.
+ * Arrays join with ", " unless a filter says otherwise.
+ */
+function substitute(value: unknown, vars: Record<string, unknown>): unknown {
+  if (typeof value === 'string')
+    return value.replace(/\$\{(\w+)(?:\[(\d+)\])?((?:\|\w+(?::[^|}]*)?)*)\}/g, (all, name, index, filters) => {
+      if (!(name in vars)) throw new Error(`Nieznana zmienna \${${name}} — zdefiniuj ją wcześniej przez --as`)
+      let v: unknown = vars[name]
+      if (index !== undefined) v = Array.isArray(v) ? v[Number(index)] : undefined
+      if (v === undefined) throw new Error(`\${${name}[${index}]} poza zakresem`)
+      let str = Array.isArray(v) ? null : String(v)
+      for (const f of String(filters).split('|').filter(Boolean)) {
+        const [fname, arg] = f.split(':')
+        if (fname === 'lines') str = Array.isArray(v) ? v.join('\n') : str
+        else if (fname === 'join') str = Array.isArray(v) ? v.join(arg ?? ', ') : str
+        else if (fname === 'url') str = encodeURIComponent(str ?? (Array.isArray(v) ? v.join(', ') : ''))
+        else throw new Error(`Nieznany filtr |${fname} (dostępne: lines, join:X, url)`)
+      }
+      return str ?? (Array.isArray(v) ? v.join(', ') : String(v))
+    })
+  if (Array.isArray(value)) return value.map((v) => substitute(v, vars))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, substitute(v, vars)]))
+  return value
 }
 
 async function batch(ctx: ControlContext, steps: Array<{ method: string; params: Record<string, unknown>; line?: string }>): Promise<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = []
+  const vars: Record<string, unknown> = {}
   let ok = true
   for (const [i, step] of steps.entries()) {
-    const r = await handle(ctx, step.method, step.params ?? {}, false)
+    let params: Record<string, unknown>
+    try {
+      params = substitute(step.params ?? {}, vars) as Record<string, unknown>
+    } catch (err) {
+      out.push({ step: i + 1, line: step.line ?? step.method, ok: false, error: (err as Error).message })
+      ok = false
+      break
+    }
+    const r = await handle(ctx, step.method, params, false)
+    if (r.ok && params.as) vars[String(params.as)] = r.result
     out.push({ step: i + 1, line: step.line ?? step.method, ...r })
     if (!r.ok) {
       ok = false
