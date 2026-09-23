@@ -47,6 +47,7 @@
 
   async function peek(): Promise<void> {
     clearTimeout(hideTimer)
+    hideTimer = undefined
     if (peekOpen) return
     // Grow the native view first, then start the slide on a painted frame
     await actions.setMode('peek')
@@ -54,10 +55,21 @@
   }
 
   function scheduleHide(): void {
-    clearTimeout(hideTimer)
+    if (hideTimer || !peekOpen) return
     hideTimer = setTimeout(() => {
+      hideTimer = undefined
       if (!renaming && !editingWorkspace) peekOpen = false
-    }, 250)
+    }, 80)
+  }
+
+  /**
+   * Track the pointer across the whole view rather than trusting enter/leave on the
+   * panel: when the panel slides in under a still cursor, the browser never "enters" it.
+   */
+  function onPointer(e: MouseEvent): void {
+    if (!overlay || palette) return
+    if (e.clientX <= width) peek()
+    else scheduleHide()
   }
 
   function onSlideEnd(e: TransitionEvent): void {
@@ -73,15 +85,13 @@
 </script>
 
 {#if snap}
-  <div class="root" style="{themeVars(workspace(snap).color)}--sw:{width}px">
+  <div class="root" role="presentation" onmousemove={onPointer} onmouseleave={() => overlay && scheduleHide()} style="{themeVars(workspace(snap).color)}--sw:{width}px">
     {#if overlay}
       <div class="edge" role="presentation" onmouseenter={peek}></div>
       <div
         class="panel overlay"
         class:open={peekOpen}
         role="presentation"
-        onmouseenter={peek}
-        onmouseleave={scheduleHide}
         ontransitionend={onSlideEnd}
       >
         <Sidebar {snap} bind:renaming bind:editingWorkspace onpalette={openPalette} />
@@ -109,7 +119,7 @@
     overflow: hidden;
     box-shadow: 6px 0 24px rgba(0, 0, 0, 0.45);
     transform: translateX(calc(-100% - 28px));
-    transition: transform 170ms cubic-bezier(0.4, 0, 1, 1);
+    transition: transform 140ms cubic-bezier(0.4, 0, 1, 1);
     will-change: transform;
   }
   .overlay.open {
