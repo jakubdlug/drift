@@ -119,7 +119,11 @@ export class TabManager {
       // Today tabs follow the page; pinned ones keep their saved URL
       if (this.store.isToday(id)) this.store.update(id, { url: navUrl })
     })
-    wc.on('did-navigate-in-page', sync)
+    wc.on('did-navigate-in-page', (_e, navUrl, isMainFrame) => {
+      sync()
+      // SPA navigation (YouTube, Gmail…) should also move today tabs along
+      if (isMainFrame && this.store.isToday(id)) this.store.update(id, { url: navUrl })
+    })
     wc.on('page-title-updated', (_e, title) => {
       tab.info.title = title
       tab.info.badge = BADGE_RE.test(title)

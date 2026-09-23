@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snapshot } from '@shared/types'
-  import { actions, activeId, hostOf } from '../lib/api.svelte'
+  import { actions, activeId, hostOf, ui } from '../lib/api.svelte'
   import Favicon from './Favicon.svelte'
 
   let { snap, mode, onclose }: { snap: Snapshot; mode: 'new' | 'edit'; onclose: () => void } = $props()
@@ -16,6 +16,11 @@
   let selected = $state(0)
   let seq = 0
   const looksLikeUrl = $derived(/^\S+\.\S+$/.test(query.trim()))
+
+  $effect(() => {
+    ui.paletteQuery = query
+    return () => (ui.paletteQuery = '')
+  })
 
   $effect(() => {
     const q = query

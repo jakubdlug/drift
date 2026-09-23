@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snapshot } from '@shared/types'
-  import { actions, app, themeVars, workspace } from './lib/api.svelte'
+  import { actions, app, themeVars, ui, workspace } from './lib/api.svelte'
   import Palette from './components/Palette.svelte'
   import Sidebar from './components/Sidebar.svelte'
 
@@ -73,9 +73,26 @@
   }
 
   function onSlideEnd(e: TransitionEvent): void {
+    if (e.target !== e.currentTarget || e.propertyName !== 'transform') return
+    ui.animating = false
     // Shrink the view back to the hot-zone only once the panel is fully out
-    if (e.target === e.currentTarget && e.propertyName === 'transform' && !peekOpen) actions.setMode('edge')
+    if (!peekOpen) actions.setMode('edge')
   }
+
+  // Mirror local state for the control channel
+  let lastPeek = false
+  $effect(() => {
+    if (peekOpen !== lastPeek) {
+      lastPeek = peekOpen
+      ui.animating = true
+      // Fallback in case transitionend never fires (e.g. view hidden mid-slide)
+      setTimeout(() => (ui.animating = false), 400)
+    }
+    ui.peekOpen = peekOpen
+    ui.palette = palette
+    ui.renaming = renaming
+    ui.editingWorkspace = editingWorkspace
+  })
 
   const snap = $derived(app.snap)
   const overlay = $derived(

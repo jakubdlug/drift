@@ -59,11 +59,22 @@ W trybie deweloperskim (albo z flagą `--control`) Drift wystawia kanał sterowa
 
 ```bash
 scripts/drift-ctl state                 # workspace, aktywna karta, pinned/today
-scripts/drift-ctl tree sidebar          # elementy z numerami [ref]
-scripts/drift-ctl click sidebar 24      # klik po ref (albo po tekście, --right, --double)
+scripts/drift-ctl status                # płaski status: mode, url, peekOpen, palette, focus…
+scripts/drift-ctl wait mode=edge animating=false   # czekaj na warunek zamiast sleep
+scripts/drift-ctl wait page selector=video --timeout 8000
+scripts/drift-ctl tree page --filter /watch        # drzewo dostępności z [ref] i linkami
+scripts/drift-ctl click page 46         # klik po ref (albo po tekście, --right, --double)
 scripts/drift-ctl menu "Nowa karta"     # pozycja menu aplikacji
 scripts/drift-ctl type sidebar github   # wpisywanie
 scripts/drift-ctl key sidebar Enter     # klawisze (--mod cmd,shift)
 scripts/drift-ctl text page             # tekst aktywnej strony
 scripts/drift-ctl logs                  # błędy konsoli sidebara
 ```
+
+Każda komenda zmieniająca stan sama raportuje:
+- `Δ` — co zmieniło się w statusie (tryb, URL, paleta, fokus…),
+- `→ trafiono` — element, który faktycznie dostał klik; zasłonięty lub niewidoczny cel jest blokowany (`--force` wymusza),
+- `✖` — nowe błędy konsoli i nieudane ładowania od poprzedniej komendy,
+- `⚠ Drift zrestartował się` — gdy zmieniła się instancja między komendami.
+
+Ze stron raportowane są wyłącznie adres, tytuł, stan ładowania i błędy — treść (`tree page`, `text page`) tylko na żądanie.

@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import type { ChromeMode, DropTarget, ItemId, Snapshot, Workspace } from '@shared/types'
 import { arcAvailable, copyStorage, importCookies, importHistory, importSidebar } from './arc-import'
-import { captureConsole, startControl } from './control'
+import { captureConsole, capturePageErrors, startControl, type Status } from './control'
 import { buildMenu } from './menu'
 import { saveStateNow, statePath, Store } from './store'
 import { TabManager } from './tabs'
@@ -51,6 +51,10 @@ const FIND_W = 380
 const FIND_H = 52
 /** 1 = sidebar docked, 0 = hidden; animated between the two on ⌘S */
 let reveal = 1
+/** Bumped on every state or tab change; lets control clients spot unexpected changes */
+let seq = 0
+/** Sidebar-local UI state reported by the renderer (peek, palette, focus…) */
+let ui: Record<string, string | number | boolean | null> = {}
 let revealTimer: NodeJS.Timeout | null = null
 const REVEAL_MS = 220
 
@@ -141,6 +145,7 @@ function applyCompact(): void {
 
 let pushTimer: NodeJS.Timeout | null = null
 function push(): void {
+  seq++
   if (pushTimer) return
   pushTimer = setTimeout(() => {
     pushTimer = null
@@ -470,6 +475,9 @@ function registerIpc(): void {
   })
   on('find-close', () => closeFind())
   on('open-find', () => openFind())
+  on('ui-state', (state: typeof ui) => {
+    ui = state
+  })
 }
 
 function animateReveal(to: number, done?: () => void): void {
@@ -617,6 +625,27 @@ function createWindow(): void {
   )
 }
 
+/** Flat status for wait conditions and before/after diffs; page data limited to url/title */
+function controlStatus(): Status {
+  const ws = store.activeWorkspace
+  const active = activeItemId()
+  const rt = active ? tabs.runtime()[active] : undefined
+  return {
+    mode,
+    compact: store.state.settings.compact,
+    animating: revealTimer !== null || !!ui.animating,
+    workspace: ws.name,
+    tab: active ? (store.state.items[active]?.title ?? null) : null,
+    url: rt?.url ?? (active ? (store.state.items[active]?.url ?? null) : null),
+    title: rt?.title ?? null,
+    loading: rt?.loading ?? false,
+    loadedTabs: Object.values(tabs.runtime()).filter((t) => !t.sleeping).length,
+    findOpen: !!findView,
+    htmlFullscreen,
+    ...ui
+  }
+}
+
 /** Compact, favicon-free view of the state for the control channel */
 function controlSummary(): unknown {
   const s = store.state
@@ -701,11 +730,19 @@ app.whenReady().then(async () => {
   registerIpc()
   createWindow()
   if (!app.isPackaged || process.argv.includes('--control')) {
+    // Tab views: errors only (never regular page console output)
+    app.on('web-contents-created', (_e, wc) => {
+      setImmediate(() => {
+        if (wc !== chrome.webContents && wc !== findView?.webContents) capturePageErrors(wc)
+      })
+    })
     startControl({
       target: (name) =>
         name === 'page' ? tabs.webContents() : name === 'find' ? (findView?.webContents ?? null) : chrome.webContents,
       actions: handlers,
-      summary: controlSummary
+      summary: controlSummary,
+      status: controlStatus,
+      seq: () => seq
     })
   }
   chrome.webContents.once('did-finish-load', () => {

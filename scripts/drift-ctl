@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 // CLI for Drift's local control channel. Run `drift-ctl help` for usage.
-const { readFileSync } = require('fs')
+const { readFileSync, writeFileSync } = require('fs')
 const { join } = require('path')
-const { homedir } = require('os')
+const { homedir, tmpdir } = require('os')
 
 const USAGE = `drift-ctl <komenda> [target] [argumenty]
 
 target: sidebar (domyślnie) | page | find
 
   state                         stan: workspace, aktywna karta, pinned/today
-  tree [target]                 interaktywne elementy z numerami [ref]
+  status                        płaski status (mode, url, peekOpen, palette, focus…)
+  wait [target] <warunek…>      czekaj aż: klucz=wart, klucz!=wart, klucz~fragment,
+                                selector=<css>; --timeout ms (domyślnie 5000)
+  tree [target]                 drzewo dostępności z numerami [ref] (--all, --filter tekst)
   text [target]                 innerText widoku
-  click <target> <ref|tekst>    klik (--right, --double, --sel <css>, --mod cmd,shift)
+  click <target> <ref|tekst>    klik (--right, --double, --sel <css>, --mod cmd,shift);
+                                zasłonięty/niewidoczny cel jest blokowany (--force)
   hover <target> <ref|tekst>    najechanie myszą
   mouse <target> <x> <y>        przesuń mysz do współrzędnych widoku
   type <target> <tekst>         wpisz tekst w element z fokusem
@@ -20,15 +24,18 @@ target: sidebar (domyślnie) | page | find
   action <nazwa> [args…]        wywołaj akcję IPC (args jako JSON lub tekst)
   eval <target> <kod>           wykonaj JS w widoku
   screenshot [target] [ścieżka] zrzut PNG (tylko gdy naprawdę potrzebny)
-  logs [--clear]                logi konsoli sidebara i paska wyszukiwania`
+  logs [--clear]                logi konsoli sidebara i paska wyszukiwania
+
+Komendy zmieniające stan same raportują: zmiany statusu, co faktycznie
+trafił klik i nowe błędy. Restart Drifta między komendami jest sygnalizowany.`
 
 const argv = process.argv.slice(2)
 const flags = {}
 const pos = []
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i]
-  if (a === '--right' || a === '--double' || a === '--clear') flags[a.slice(2)] = true
-  else if (a === '--sel' || a === '--mod') flags[a.slice(2)] = argv[++i]
+  if (a === '--right' || a === '--double' || a === '--clear' || a === '--all' || a === '--json' || a === '--force') flags[a.slice(2)] = true
+  else if (a === '--sel' || a === '--mod' || a === '--timeout' || a === '--filter') flags[a.slice(2)] = argv[++i]
   else pos.push(a)
 }
 const [cmd, ...rest] = pos
@@ -53,13 +60,18 @@ let method = cmd
 let params = {}
 switch (cmd) {
   case 'tree':
+    params = { target: takeTarget(), all: !!flags.all, filter: flags.filter }
+    break
   case 'text':
     params = { target: takeTarget() }
+    break
+  case 'wait':
+    params = { target: takeTarget(), conditions: rest, timeout: flags.timeout ? Number(flags.timeout) : undefined }
     break
   case 'click':
   case 'hover': {
     const target = takeTarget()
-    params = { target, ...selector(rest.join(' ')), button: flags.right ? 'right' : 'left', double: !!flags.double, modifiers }
+    params = { target, ...selector(rest.join(' ')), button: flags.right ? 'right' : 'left', double: !!flags.double, force: !!flags.force, modifiers }
     break
   }
   case 'mouse': {
@@ -114,12 +126,30 @@ fetch(`http://127.0.0.1:${conf.port}/`, {
 })
   .then((r) => r.json())
   .then((r) => {
-    if (!r.ok) {
-      console.error(`Błąd: ${r.error}`)
-      process.exit(1)
+    if (flags.json) {
+      console.log(JSON.stringify(r, null, 2))
+      process.exit(r.ok ? 0 : 1)
     }
-    const out = r.result
-    console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 2))
+    // Restart detection: compare with the instance seen by the previous command
+    const lastFile = join(tmpdir(), 'drift-ctl-last.json')
+    let last = null
+    try {
+      last = JSON.parse(readFileSync(lastFile, 'utf8'))
+    } catch {}
+    if (last && r.meta && last.instance !== r.meta.instance) console.log(`⚠ Drift zrestartował się od poprzedniej komendy (instancja ${last.instance} → ${r.meta.instance})`)
+    else if (last && r.meta && r.meta.seq - last.seq > 0 && cmd !== 'wait' && !['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse'].includes(cmd))
+      console.log(`ℹ stan zmienił się ${r.meta.seq - last.seq}× od poprzedniej komendy`)
+    if (r.meta) writeFileSync(lastFile, JSON.stringify(r.meta))
+
+    if (r.ok) {
+      const out = r.result
+      if (out !== undefined && out !== 'ok') console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 2))
+      else if (!r.changes) console.log('ok')
+    } else console.error(`Błąd: ${r.error}`)
+    if (r.hit && (r.ok || r.hit.ok)) console.log(r.hit.ok ? `→ trafiono: ${r.hit.hit}` : `⚠ klik trafił w ${r.hit.hit}, a cel to ${r.hit.target} (coś go zasłania?)`)
+    if (r.changes) console.log(r.changes.length ? `Δ ${r.changes.join('\n  ')}` : 'Δ brak zmian w statusie')
+    if (r.errors) console.log(`✖ nowe błędy:\n  ${r.errors.join('\n  ')}`)
+    process.exit(r.ok ? 0 : 1)
   })
   .catch((e) => {
     console.error(`Brak połączenia: ${e.message}`)

@@ -67,3 +67,34 @@ export function themeVars(hex: string): string {
 }
 
 export const drag = $state<{ id: ItemId | null }>({ id: null })
+
+/** Sidebar-local UI state, mirrored to main for the control channel (status / wait / diffs) */
+export const ui = $state({
+  peekOpen: false,
+  animating: false,
+  palette: null as 'new' | 'edit' | null,
+  paletteQuery: '',
+  renaming: null as string | null,
+  editingWorkspace: null as string | null,
+  focus: 'body',
+  dragging: false
+})
+
+function describeFocus(el: Element | null): string {
+  if (!el || el === document.body) return 'body'
+  const label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || (el as HTMLElement).innerText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40)
+  return `${el.tagName.toLowerCase()}${label ? ` "${label}"` : ''}`
+}
+
+document.addEventListener('focusin', () => (ui.focus = describeFocus(document.activeElement)))
+document.addEventListener('focusout', () => setTimeout(() => (ui.focus = describeFocus(document.activeElement))))
+
+$effect.root(() => {
+  $effect(() => {
+    ui.dragging = drag.id !== null
+    call('ui-state', $state.snapshot(ui))
+  })
+})
