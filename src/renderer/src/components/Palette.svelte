@@ -7,7 +7,10 @@
 
   type Suggestion = Awaited<ReturnType<typeof actions.suggest>>[number]
 
+  // The palette is re-created on every open, so reading the initial values is intended
+  // svelte-ignore state_referenced_locally
   const current = activeId(snap)
+  // svelte-ignore state_referenced_locally
   let query = $state(mode === 'edit' && current ? (snap.tabs[current]?.url ?? snap.state.items[current]?.url ?? '') : '')
   let results = $state<Suggestion[]>([])
   let selected = $state(0)

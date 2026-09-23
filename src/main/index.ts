@@ -14,8 +14,22 @@ const PEEK_SHADOW = 16
 app.setName('Drift')
 nativeTheme.themeSource = 'dark'
 
-// Two instances would share (and corrupt) the same session databases
-if (!app.requestSingleInstanceLock()) app.quit()
+/**
+ * Two instances would share (and corrupt) the same session databases. In dev the
+ * watcher restarts us right after killing the old process, so wait for its lock.
+ */
+async function acquireInstanceLock(): Promise<boolean> {
+  const deadline = Date.now() + (app.isPackaged ? 0 : 8000)
+  while (!app.requestSingleInstanceLock()) {
+    if (Date.now() > deadline) return false
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  return true
+}
+
+// Watchers and scripts stop us with SIGTERM; quit properly so state gets flushed
+process.on('SIGTERM', () => app.quit())
+
 app.on('second-instance', (_e, argv) => {
   if (!win) return
   win.show()
@@ -643,6 +657,12 @@ app.on('open-file', (e, path) => {
 })
 
 app.whenReady().then(async () => {
+  if (!(await acquireInstanceLock())) {
+    app.quit()
+    return
+  }
+  // Dev runs from the stock Electron binary; show Drift's icon in the Dock anyway
+  if (!app.isPackaged) app.dock?.setIcon(join(__dirname, '../../resources/icon.png'))
   store = new Store()
   const firstRun = !existsSync(statePath())
   if (process.argv.includes('--import-arc') || (firstRun && arcAvailable())) {

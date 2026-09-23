@@ -6,12 +6,23 @@ Lekka przeglądarka w stylu Arc na Electronie (Chromium). Vertical tabs z auto-u
 
 ```bash
 npm install
-npm run dev          # tryb deweloperski z hot reloadem sidebara
+npm run live         # iteracja na żywo: sidebar HMR, zmiany w main → auto-restart
+npm run install-app  # zbuduj i podmień /Applications/Drift.app
+npm run dev          # jak live, ale bez auto-restartu procesu głównego
 npm run import:arc   # ponowny import z Arca (nadpisuje stan Drifta)
 npm run dist         # Drift.app w dist/
 ```
 
 Pierwsze uruchomienie importuje dane z Arca automatycznie, jeśli Arc jest zainstalowany.
+
+## Iteracja na żywo
+
+`npm run live` zamyka zainstalowany Drift (dane są wspólne, a dwie instancje naraz by je uszkodziły) i startuje wersję dev:
+
+- zmiany w `src/renderer` (Svelte, CSS) są widoczne od razu, bez przeładowania stron,
+- zmiany w `src/main` / `src/preload` restartują aplikację; stan się zapisuje, aktywne karty wracają.
+
+Gdy wersja jest dobra: `npm run install-app`.
 
 ## Co jest importowane z Arca
 

@@ -12,7 +12,9 @@
     "import:arc": "electron-vite build && electron . --import-arc",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && svelte-check --tsconfig tsconfig.web.json",
     "dist": "electron-vite build && electron-builder --mac --dir",
-    "ctl": "node scripts/drift-ctl"
+    "ctl": "node scripts/drift-ctl",
+    "live": "sh scripts/live.sh",
+    "install-app": "sh scripts/install-app.sh"
   },
   "build": {
     "appId": "com.teceer.drift",
