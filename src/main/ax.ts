@@ -21,7 +21,7 @@ interface AXNode {
 }
 
 /** Roles that only add nesting noise; their children are lifted up */
-const TRANSPARENT = new Set(['generic', 'none', 'presentation', 'InlineTextBox', 'LineBreak', 'group', 'Section', 'paragraph', 'LayoutTable', 'LayoutTableRow', 'LayoutTableCell'])
+export const TRANSPARENT = new Set(['generic', 'none', 'presentation', 'InlineTextBox', 'LineBreak', 'group', 'Section', 'paragraph', 'LayoutTable', 'LayoutTableRow', 'LayoutTableCell'])
 const INTERACTIVE = new Set(['link', 'button', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'option', 'slider', 'treeitem', 'listbox', 'spinbutton'])
 const MAX_LINES = 400
 
@@ -91,6 +91,8 @@ export interface AxOptions {
   all?: boolean
   /** Only lines containing this text (case-insensitive), plus their refs */
   filter?: string
+  /** Start the walk at this DOM node (snapshot of one region/dialog) */
+  rootBackendId?: number
 }
 
 export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<string> {
@@ -148,19 +150,86 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
     for (const c of n.childIds ?? []) walk(c, childDepth)
   }
 
-  walk(nodes[0].nodeId, 0)
+  const root = opts.rootBackendId ? nodes.find((n) => n.backendDOMNodeId === opts.rootBackendId) : nodes[0]
+  if (!root) throw new Error('Nie znaleziono węzła do snapshotu')
+  walk(root.nodeId, 0)
   if (lines.length >= MAX_LINES) lines.push(`… ucięto po ${MAX_LINES} liniach (użyj --filter)`)
   return lines.join('\n') || '(pusto — brak elementów w widoku)'
 }
 
-/** Viewport centre of a ref from the latest snapshot, scrolled into view first */
-export async function refPoint(wc: WebContents, ref: number): Promise<{ x: number; y: number; backendNodeId: number }> {
+export function refNode(wc: WebContents, ref: number): number {
   const backendNodeId = refs.get(wc)?.get(ref)
   if (!backendNodeId) throw new Error(`Brak ref ${ref} — zrób najpierw świeży tree`)
+  return backendNodeId
+}
+
+/** Known ARIA roles; a selector starting with one of these is "role name" */
+export const ROLES = new Set([
+  ...INTERACTIVE,
+  'heading', 'img', 'dialog', 'region', 'navigation', 'main', 'row', 'gridcell', 'cell', 'list', 'listitem', 'alert', 'status', 'article', 'form', 'toolbar', 'menu', 'tabpanel'
+])
+
+export interface AxQuery {
+  role?: string
+  name: string
+}
+
+/**
+ * Finds the best visible node for role + accessible name: exact name first,
+ * then prefix, then substring. Hidden duplicates (common in Gmail) are skipped.
+ */
+export async function axFind(wc: WebContents, q: AxQuery, requireVisible = true): Promise<number | null> {
+  const { nodes } = await cdp<{ nodes: AXNode[] }>(wc, 'Accessibility.getFullAXTree')
+  const want = q.name.toLowerCase().replace(/\s+/g, ' ').trim()
+  const scored: Array<{ id: number; score: number }> = []
+  for (const n of nodes) {
+    if (n.ignored || !n.backendDOMNodeId) continue
+    const role = String(n.role?.value ?? '')
+    if (q.role && role !== q.role) continue
+    if (!q.role && (TRANSPARENT.has(role) || role === 'StaticText')) continue
+    const name = String(n.name?.value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    if (!name) continue
+    const score = name === want ? 3 : name.startsWith(want) ? 2 : name.includes(want) ? 1 : 0
+    if (score) scored.push({ id: n.backendDOMNodeId, score: score + (INTERACTIVE.has(role) ? 0.5 : 0) })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  if (!requireVisible) return scored[0]?.id ?? null
+  await cdp(wc, 'DOM.enable')
+  for (const c of scored.slice(0, 15)) {
+    const { quads } = await cdp<{ quads: number[][] }>(wc, 'DOM.getContentQuads', { backendNodeId: c.id }).catch(() => ({ quads: [] }))
+    if (quads.length) return c.id
+  }
+  return null
+}
+
+/** Names of nodes with this role (or all interactive ones) — shown when a lookup fails */
+export async function axCandidates(wc: WebContents, role?: string, query = '', limit = 8): Promise<string[]> {
+  const { nodes } = await cdp<{ nodes: AXNode[] }>(wc, 'Accessibility.getFullAXTree')
+  // Rank by shared word prefixes with the query, so near-misses come first
+  const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2).map((w) => w.slice(0, 4))
+  const seen = new Set<string>()
+  const scored: Array<{ label: string; score: number }> = []
+  for (const n of nodes) {
+    if (n.ignored) continue
+    const r = String(n.role?.value ?? '')
+    if (role ? r !== role : !INTERACTIVE.has(r)) continue
+    const name = String(n.name?.value ?? '').replace(/\s+/g, ' ').trim()
+    const label = `${r} "${name.slice(0, 60)}"`
+    if (!name || seen.has(label)) continue
+    seen.add(label)
+    const lower = name.toLowerCase()
+    scored.push({ label, score: words.filter((w) => lower.includes(w)).length })
+  }
+  if (words.length && scored.some((c) => c.score)) return scored.filter((c) => c.score).sort((a, b) => b.score - a.score).slice(0, limit).map((c) => c.label)
+  return scored.slice(0, limit).map((c) => c.label)
+}
+
+/** Viewport centre of a DOM node, scrolled into view first */
+export async function nodePoint(wc: WebContents, backendNodeId: number): Promise<{ x: number; y: number; backendNodeId: number }> {
   await cdp(wc, 'DOM.enable')
   await cdp(wc, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }).catch(() => {})
   const { quads } = await cdp<{ quads: number[][] }>(wc, 'DOM.getContentQuads', { backendNodeId })
-  if (!quads.length) throw new Error(`Element ref ${ref} nie ma widocznego obszaru`)
+  if (!quads.length) throw new Error('Element nie ma widocznego obszaru')
   const q = quads[0]
   return { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4, backendNodeId }
 }

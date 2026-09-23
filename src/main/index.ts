@@ -475,6 +475,7 @@ function registerIpc(): void {
   })
   on('find-close', () => closeFind())
   on('open-find', () => openFind())
+  on('open-by-name', (query: string) => openByName(query))
   on('ui-state', (state: typeof ui) => {
     ui = state
   })
@@ -495,6 +496,36 @@ function animateReveal(to: number, done?: () => void): void {
       done?.()
     }
   }, 1000 / 60)
+}
+
+/**
+ * Opens a sidebar item by (part of) its title or URL: Essentials and pinned of
+ * the active workspace first, then its Today tabs, then other workspaces.
+ */
+function openByName(query: string): string {
+  const q = query.toLowerCase().trim()
+  if (!q) throw new Error('Podaj nazwę karty')
+  const s = store.state
+  const flatten = (ids: ItemId[]): ItemId[] =>
+    ids.flatMap((id) => (s.items[id]?.kind === 'folder' ? flatten(s.items[id].children ?? []) : [id]))
+  const score = (id: ItemId): number => {
+    const it = s.items[id]
+    if (!it || it.kind !== 'tab') return 0
+    const title = (tabs.runtime()[id]?.title || it.title).toLowerCase()
+    const url = (it.url ?? '').toLowerCase()
+    return title === q ? 4 : title.startsWith(q) ? 3 : title.includes(q) ? 2 : url.includes(q) ? 1 : 0
+  }
+  const ordered = [store.activeWorkspace, ...s.workspaces.filter((w) => w !== store.activeWorkspace)]
+  for (const ws of ordered) {
+    const candidates = [...flatten(s.essentials[ws.profileId] ?? []), ...flatten(ws.pinned), ...ws.today]
+    const best = candidates.map((id) => ({ id, sc: score(id) })).filter((c) => c.sc).sort((a, b) => b.sc - a.sc)[0]
+    if (best) {
+      if (ws.id !== store.activeWorkspace.id) switchWorkspace(ws.id)
+      openItem(best.id)
+      return `otwarto "${s.items[best.id].title}"${ws.id !== ordered[0].id ? ` w workspace ${ws.name}` : ''}`
+    }
+  }
+  throw new Error(`Brak karty pasującej do "${query}"`)
 }
 
 function toggleCompact(): void {
@@ -742,7 +773,12 @@ app.whenReady().then(async () => {
       actions: handlers,
       summary: controlSummary,
       status: controlStatus,
-      seq: () => seq
+      seq: () => seq,
+      revealSidebar: async () => {
+        chrome.webContents.send('command', { type: 'peek' })
+        const until = Date.now() + 1500
+        while (Date.now() < until && !(ui.peekOpen && !ui.animating && mode === 'peek')) await new Promise((r) => setTimeout(r, 30))
+      }
     })
   }
   chrome.webContents.once('did-finish-load', () => {

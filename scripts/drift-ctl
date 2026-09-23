@@ -7,107 +7,214 @@ const { homedir, tmpdir } = require('os')
 const USAGE = `drift-ctl <komenda> [target] [argumenty]
 
 target: sidebar (domyślnie) | page | find
+<sel>:  12 (ref z tree) | button Wyślij (rola + nazwa) | Wyślij (nazwa) | css:.tile | text:Clear
 
   state                         stan: workspace, aktywna karta, pinned/today
   status                        płaski status (mode, url, peekOpen, palette, focus…)
-  wait [target] <warunek…>      czekaj aż: klucz=wart, klucz!=wart, klucz~fragment,
-                                selector=<css>; --timeout ms (domyślnie 5000)
-  tree [target]                 drzewo dostępności z numerami [ref] (--all, --filter tekst)
-  text [target]                 innerText widoku
-  click <target> <ref|tekst>    klik (--right, --double, --sel <css>, --mod cmd,shift);
-                                zasłonięty/niewidoczny cel jest blokowany (--force)
-  hover <target> <ref|tekst>    najechanie myszą
+  open <nazwa>                  otwórz kartę po tytule/URL (Essentials, pinned, Today, inne workspace'y)
+  wait [target] <warunek…>      klucz=wart | klucz!=wart | klucz~fragment | el=<sel> | text~<tekst>
+                                | selector=<css>; --timeout ms (domyślnie 5000)
+  tree [target]                 drzewo dostępności z [ref] (--all, --filter tekst)
+  snapshot <target> <sel>       drzewo jednego fragmentu, np. dialog "Nowa wiadomość"
+  click <target> <sel>          klik (--right, --double, --mod cmd,shift, --force)
+  fill <target> <sel> <tekst>   klik w pole, zastąp zawartość, wpisz
+  hover <target> <sel>          najechanie myszą
   mouse <target> <x> <y>        przesuń mysz do współrzędnych widoku
   type <target> <tekst>         wpisz tekst w element z fokusem
   key <target> <Klawisz>        np. Enter, Escape, Down, a (--mod cmd,shift)
   menu "<etykieta>"             kliknij pozycję menu aplikacji, np. "Nowa karta"
   action <nazwa> [args…]        wywołaj akcję IPC (args jako JSON lub tekst)
   eval <target> <kod>           wykonaj JS w widoku
+  text [target]                 innerText widoku
   screenshot [target] [ścieżka] zrzut PNG (tylko gdy naprawdę potrzebny)
   logs [--clear]                logi konsoli sidebara i paska wyszukiwania
+  run [plik]                    wykonaj skrypt (jedna komenda na linię, # komentarz)
+                                w JEDNYM zapytaniu; stop na pierwszym błędzie
 
-Komendy zmieniające stan same raportują: zmiany statusu, co faktycznie
-trafił klik i nowe błędy. Restart Drifta między komendami jest sygnalizowany.`
+Komendy zmieniające stan same raportują: zmiany statusu (Δ), co trafił klik (→)
+i nowe błędy (✖). Restart Drifta między komendami jest sygnalizowany (⚠).`
 
-const argv = process.argv.slice(2)
-const flags = {}
-const pos = []
-for (let i = 0; i < argv.length; i++) {
-  const a = argv[i]
-  if (a === '--right' || a === '--double' || a === '--clear' || a === '--all' || a === '--json' || a === '--force') flags[a.slice(2)] = true
-  else if (a === '--sel' || a === '--mod' || a === '--timeout' || a === '--filter') flags[a.slice(2)] = argv[++i]
-  else pos.push(a)
-}
-const [cmd, ...rest] = pos
-if (!cmd || cmd === 'help') {
-  console.log(USAGE)
-  process.exit(0)
-}
-
+const BOOL_FLAGS = new Set(['right', 'double', 'clear', 'all', 'json', 'force'])
+const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter'])
 const TARGETS = ['sidebar', 'page', 'find']
-const takeTarget = () => (TARGETS.includes(rest[0]) ? rest.shift() : 'sidebar')
-const parse = (v) => {
+const MUTATING = new Set(['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse', 'fill', 'open'])
+
+/** Shell-like tokenizer for script lines: "..." and '...' group words, quotes are stripped */
+function tokenize(line) {
+  const out = []
+  let cur = ''
+  let quote = null
+  let has = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (quote) {
+      if (ch === '\\' && line[i + 1] === quote) cur += line[++i]
+      else if (ch === quote) quote = null
+      else cur += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+      has = true
+    } else if (/\s/.test(ch)) {
+      if (cur || has) out.push(cur)
+      cur = ''
+      has = false
+    } else cur += ch
+  }
+  if (cur || has) out.push(cur)
+  return out
+}
+
+function parseArgs(argv) {
+  const flags = {}
+  const pos = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    const name = a.startsWith('--') ? a.slice(2) : null
+    if (name && BOOL_FLAGS.has(name)) flags[name] = true
+    else if (name && VALUE_FLAGS.has(name)) flags[name] = argv[++i]
+    else pos.push(a)
+  }
+  const [cmd, ...rest] = pos
+  return { cmd, rest, flags }
+}
+
+const parseValue = (v) => {
   try {
     return JSON.parse(v)
   } catch {
     return v
   }
 }
-const selector = (v) => (flags.sel ? { selector: flags.sel } : /^\d+$/.test(v ?? '') ? { ref: Number(v) } : { text: v })
-const modifiers = flags.mod ? flags.mod.split(',') : undefined
 
-let method = cmd
-let params = {}
-switch (cmd) {
-  case 'tree':
-    params = { target: takeTarget(), all: !!flags.all, filter: flags.filter }
-    break
-  case 'text':
-    params = { target: takeTarget() }
-    break
-  case 'wait':
-    params = { target: takeTarget(), conditions: rest, timeout: flags.timeout ? Number(flags.timeout) : undefined }
-    break
-  case 'click':
-  case 'hover': {
-    const target = takeTarget()
-    params = { target, ...selector(rest.join(' ')), button: flags.right ? 'right' : 'left', double: !!flags.double, force: !!flags.force, modifiers }
-    break
+/** Turns one command (argv form) into a request for the control server */
+function buildRequest({ cmd, rest, flags }) {
+  const r = [...rest]
+  const takeTarget = () => (TARGETS.includes(r[0]) ? r.shift() : 'sidebar')
+  const modifiers = flags.mod ? flags.mod.split(',') : undefined
+  const sel = () => (flags.sel ? `css:${flags.sel}` : r.join(' '))
+  switch (cmd) {
+    case 'tree':
+      return { method: 'tree', params: { target: takeTarget(), all: !!flags.all, filter: flags.filter } }
+    case 'text':
+      return { method: 'text', params: { target: takeTarget() } }
+    case 'wait': {
+      const target = takeTarget()
+      // Values may contain spaces ("el=textbox Treść wiadomości"): split only before the next key=
+      const conditions = r.join(' ').split(/\s+(?=[\w.]+\s*(?:!=|=|~))/).filter(Boolean)
+      return { method: 'wait', params: { target, conditions, timeout: flags.timeout ? Number(flags.timeout) : undefined } }
+    }
+    case 'click':
+    case 'hover': {
+      const target = takeTarget()
+      return { method: cmd, params: { target, sel: sel(), button: flags.right ? 'right' : 'left', double: !!flags.double, force: !!flags.force, modifiers } }
+    }
+    case 'fill': {
+      const target = takeTarget()
+      const value = r.pop()
+      return { method: 'fill', params: { target, sel: flags.sel ? `css:${flags.sel}` : r.join(' '), value, force: !!flags.force } }
+    }
+    case 'snapshot': {
+      const target = takeTarget()
+      return { method: 'snapshot', params: { target, sel: sel() } }
+    }
+    case 'open':
+      return { method: 'open', params: { name: r.join(' ') } }
+    case 'mouse': {
+      const target = takeTarget()
+      return { method: 'mouse', params: { target, x: r[0], y: r[1] } }
+    }
+    case 'type': {
+      const target = takeTarget()
+      return { method: 'type', params: { target, text: r.join(' ') } }
+    }
+    case 'key': {
+      const target = takeTarget()
+      return { method: 'key', params: { target, key: r[0], modifiers } }
+    }
+    case 'menu':
+      return { method: 'menu', params: { label: r.join(' ') } }
+    case 'action':
+      return { method: 'action', params: { name: r[0], args: r.slice(1).map(parseValue) } }
+    case 'eval': {
+      const target = takeTarget()
+      return { method: 'eval', params: { target, code: r.join(' ') } }
+    }
+    case 'screenshot': {
+      const target = takeTarget()
+      return { method: 'screenshot', params: { target, path: r[0] } }
+    }
+    case 'logs':
+      return { method: 'logs', params: { clear: !!flags.clear } }
+    case 'state':
+    case 'status':
+      return { method: cmd, params: {} }
+    default:
+      throw new Error(`Nieznana komenda: ${cmd}`)
   }
-  case 'mouse': {
-    const target = takeTarget()
-    params = { target, x: rest[0], y: rest[1] }
-    break
+}
+
+// ---------- output ----------
+
+function formatStep(r, prefix = '') {
+  const lines = []
+  if (r.ok) {
+    const out = r.result
+    if (out !== undefined && out !== 'ok') lines.push(typeof out === 'string' ? out : JSON.stringify(out, null, 2))
+  } else lines.push(`Błąd: ${r.error}`)
+  if (r.hit && (r.ok || r.hit.ok)) lines.push(r.hit.ok ? `→ trafiono: ${r.hit.hit}` : `⚠ klik trafił w ${r.hit.hit}, a cel to ${r.hit.target}`)
+  if (r.changes && r.changes.length) lines.push(`Δ ${r.changes.join('\n  ')}`)
+  return lines.map((l) => prefix + l.split('\n').join('\n' + ' '.repeat(prefix.length))).join('\n')
+}
+
+function report(r, cmd) {
+  const lastFile = join(tmpdir(), 'drift-ctl-last.json')
+  let last = null
+  try {
+    last = JSON.parse(readFileSync(lastFile, 'utf8'))
+  } catch {}
+  if (last && r.meta && last.instance !== r.meta.instance) console.log(`⚠ Drift zrestartował się od poprzedniej komendy (instancja ${last.instance} → ${r.meta.instance})`)
+  else if (last && r.meta && r.meta.seq - last.seq > 0 && cmd !== 'wait' && cmd !== 'run' && !MUTATING.has(cmd))
+    console.log(`ℹ stan zmienił się ${r.meta.seq - last.seq}× od poprzedniej komendy`)
+  if (r.meta) writeFileSync(lastFile, JSON.stringify(r.meta))
+
+  if (r.steps) {
+    for (const s of r.steps) {
+      console.log(`${s.ok ? '✓' : '✗'} ${s.step}. ${s.line}`)
+      const body = formatStep(s, '   ')
+      if (body.trim()) console.log(body)
+    }
+    if (!r.ok) console.log(`Zatrzymano na kroku ${r.steps.length}/${r.total}`)
+    else console.log(`Gotowe: ${r.total}/${r.total} kroków w jednym zapytaniu`)
+  } else {
+    const body = formatStep(r)
+    console.log(body || (r.changes ? 'Δ brak zmian w statusie' : 'ok'))
+    if (r.changes && !r.changes.length && body) console.log('Δ brak zmian w statusie')
   }
-  case 'type': {
-    const target = takeTarget()
-    params = { target, text: rest.join(' ') }
-    break
-  }
-  case 'key': {
-    const target = takeTarget()
-    params = { target, key: rest[0], modifiers }
-    break
-  }
-  case 'menu':
-    params = { label: rest.join(' ') }
-    break
-  case 'action':
-    params = { name: rest[0], args: rest.slice(1).map(parse) }
-    break
-  case 'eval': {
-    const target = takeTarget()
-    params = { target, code: rest.join(' ') }
-    break
-  }
-  case 'screenshot': {
-    const target = takeTarget()
-    params = { target, path: rest[0] }
-    break
-  }
-  case 'logs':
-    params = { clear: !!flags.clear }
-    break
+  if (r.errors) console.log(`✖ nowe błędy:\n  ${r.errors.join('\n  ')}`)
+}
+
+// ---------- main ----------
+
+const top = parseArgs(process.argv.slice(2))
+if (!top.cmd || top.cmd === 'help') {
+  console.log(USAGE)
+  process.exit(0)
+}
+
+let body
+try {
+  if (top.cmd === 'run') {
+    const src = top.rest[0] ? readFileSync(top.rest[0], 'utf8') : readFileSync(0, 'utf8')
+    const steps = src
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'))
+      .map((line) => ({ ...buildRequest(parseArgs(tokenize(line))), line }))
+    body = { method: 'batch', steps }
+  } else body = buildRequest(top)
+} catch (e) {
+  console.error(e.message)
+  process.exit(1)
 }
 
 let conf
@@ -122,33 +229,12 @@ try {
 fetch(`http://127.0.0.1:${conf.port}/`, {
   method: 'POST',
   headers: { authorization: `Bearer ${conf.token}`, 'content-type': 'application/json' },
-  body: JSON.stringify({ method, params })
+  body: JSON.stringify(body)
 })
   .then((r) => r.json())
   .then((r) => {
-    if (flags.json) {
-      console.log(JSON.stringify(r, null, 2))
-      process.exit(r.ok ? 0 : 1)
-    }
-    // Restart detection: compare with the instance seen by the previous command
-    const lastFile = join(tmpdir(), 'drift-ctl-last.json')
-    let last = null
-    try {
-      last = JSON.parse(readFileSync(lastFile, 'utf8'))
-    } catch {}
-    if (last && r.meta && last.instance !== r.meta.instance) console.log(`⚠ Drift zrestartował się od poprzedniej komendy (instancja ${last.instance} → ${r.meta.instance})`)
-    else if (last && r.meta && r.meta.seq - last.seq > 0 && cmd !== 'wait' && !['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse'].includes(cmd))
-      console.log(`ℹ stan zmienił się ${r.meta.seq - last.seq}× od poprzedniej komendy`)
-    if (r.meta) writeFileSync(lastFile, JSON.stringify(r.meta))
-
-    if (r.ok) {
-      const out = r.result
-      if (out !== undefined && out !== 'ok') console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 2))
-      else if (!r.changes) console.log('ok')
-    } else console.error(`Błąd: ${r.error}`)
-    if (r.hit && (r.ok || r.hit.ok)) console.log(r.hit.ok ? `→ trafiono: ${r.hit.hit}` : `⚠ klik trafił w ${r.hit.hit}, a cel to ${r.hit.target} (coś go zasłania?)`)
-    if (r.changes) console.log(r.changes.length ? `Δ ${r.changes.join('\n  ')}` : 'Δ brak zmian w statusie')
-    if (r.errors) console.log(`✖ nowe błędy:\n  ${r.errors.join('\n  ')}`)
+    if (top.flags.json) console.log(JSON.stringify(r, null, 2))
+    else report(r, top.cmd)
     process.exit(r.ok ? 0 : 1)
   })
   .catch((e) => {

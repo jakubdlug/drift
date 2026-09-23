@@ -22,6 +22,7 @@
       if (app.snap?.state.settings.compact) peek()
     }
     if (cmd.type === 'edit-workspace') editingWorkspace = cmd.id
+    if (cmd.type === 'peek' && app.snap?.state.settings.compact) peek()
   })
 
   async function openPalette(mode: 'new' | 'edit'): Promise<void> {

@@ -71,6 +71,24 @@ scripts/drift-ctl text page             # tekst aktywnej strony
 scripts/drift-ctl logs                  # błędy konsoli sidebara
 ```
 
+Wskazywanie elementów (`<sel>`): `12` (ref z `tree`), `button Wyślij` (rola + nazwa dostępności), `Wyślij` (sama nazwa), `css:.tile`, `text:Clear`. Gdy nic nie pasuje, błąd podaje najbardziej podobne elementy.
+
+Cały scenariusz można wysłać w **jednym** zapytaniu (`run`, stop na pierwszym błędzie):
+
+```bash
+scripts/drift-ctl run <<'EOF'
+open Gmail
+wait page el=button Utwórz --timeout 15000
+click page button Utwórz
+wait page el=textbox Temat
+type page kontakt@teceer.com
+key page Enter
+fill page textbox Temat "Temat maila"
+fill page "textbox Treść wiadomości" "Treść"
+snapshot page region "Temat maila"
+EOF
+```
+
 Każda komenda zmieniająca stan sama raportuje:
 - `Δ` — co zmieniło się w statusie (tryb, URL, paleta, fokus…),
 - `→ trafiono` — element, który faktycznie dostał klik; zasłonięty lub niewidoczny cel jest blokowany (`--force` wymusza),

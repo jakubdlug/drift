@@ -4,7 +4,7 @@ import { writeFileSync } from 'fs'
 import { createServer } from 'http'
 import type { AddressInfo } from 'net'
 import { join } from 'path'
-import { axTree, refPoint } from './ax'
+import { axCandidates, axFind, axTree, nodePoint, refNode, ROLES } from './ax'
 
 /**
  * Local automation channel: lets a coding agent (or scripts/drift-ctl) read
@@ -27,6 +27,8 @@ export interface ControlContext {
   summary: () => unknown
   status: () => Status
   seq: () => number
+  /** Slides the compact sidebar in so its elements can be clicked */
+  revealSidebar: () => Promise<void>
 }
 
 const INSTANCE = randomUUID().slice(0, 8)
@@ -134,6 +136,59 @@ async function hitForRef(wc: WebContents, backendNodeId: number, x: number, y: n
   return result.value
 }
 
+// ---------- unified selectors ----------
+
+/**
+ * One selector syntax for every command:
+ *   12                 → ref from the latest tree
+ *   css:.tile          → CSS selector
+ *   text:Clear         → element by visible text (DOM)
+ *   button Wyślij      → role + accessible name (role must be a known ARIA role)
+ *   Wyślij             → accessible name, any role
+ */
+type Resolved = { kind: 'node'; backendNodeId: number } | { kind: 'dom'; x: number; y: number }
+
+function parseSelector(raw: string): { ref?: number; css?: string; text?: string; role?: string; name?: string } {
+  const sel = raw.trim()
+  if (/^\d+$/.test(sel)) return { ref: Number(sel) }
+  if (sel.startsWith('css:')) return { css: sel.slice(4).trim() }
+  if (sel.startsWith('text:')) return { text: sel.slice(5).trim() }
+  const unquote = (v: string): string => v.trim().replace(/^["'](.*)["']$/, '$1')
+  const m = sel.match(/^(\w+)\s+(.+)$/)
+  if (m && ROLES.has(m[1])) return { role: m[1], name: unquote(m[2]) }
+  return { name: unquote(sel) }
+}
+
+async function resolve(wc: WebContents, raw: string, requireVisible = true): Promise<Resolved> {
+  const s = parseSelector(raw)
+  if (s.ref) return { kind: 'node', backendNodeId: refNode(wc, s.ref) }
+  if (s.css || s.text) {
+    const found = (await wc.executeJavaScript(locateJs({ selector: s.css, text: s.text }))) as { x: number; y: number } | null
+    if (!found) throw new Error(`Nie znaleziono: ${raw}`)
+    return { kind: 'dom', ...found }
+  }
+  const id = await axFind(wc, { role: s.role, name: s.name! }, requireVisible)
+  if (!id) {
+    const hint = await axCandidates(wc, s.role, s.name).catch(() => [])
+    throw new Error(`Nie znaleziono${requireVisible ? ' widocznego' : ''} elementu: ${raw}${hint.length ? `\n   dostępne ${s.role ?? 'interaktywne'}: ${hint.join(', ')}` : ''}`)
+  }
+  return { kind: 'node', backendNodeId: id }
+}
+
+/** Resolves a selector to click coordinates plus a hit-test of that point */
+async function point(wc: WebContents, raw: string): Promise<{ x: number; y: number; backendNodeId?: number; hit: Extra['hit'] }> {
+  const r = await resolve(wc, raw)
+  if (r.kind === 'dom') {
+    const x = Math.round(r.x)
+    const y = Math.round(r.y)
+    return { x, y, hit: await wc.executeJavaScript(hitJs(x, y)) }
+  }
+  const p = await nodePoint(wc, r.backendNodeId)
+  const x = Math.round(p.x)
+  const y = Math.round(p.y)
+  return { x, y, backendNodeId: r.backendNodeId, hit: await hitForRef(wc, r.backendNodeId, x, y) }
+}
+
 // ---------- status, diff, wait ----------
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -177,6 +232,22 @@ function parseCondition(raw: string): Condition {
 }
 
 async function checkCondition(ctx: ControlContext, c: Condition, target: Target): Promise<boolean> {
+  if (c.key === 'el') {
+    const wc = ctx.target(target)
+    if (!wc) return false
+    const found = await resolve(wc, c.value).then(
+      () => true,
+      () => false
+    )
+    return c.op === '!=' ? !found : found
+  }
+  if (c.key === 'text') {
+    const wc = ctx.target(target)
+    if (!wc) return false
+    const body = String(await wc.executeJavaScript('document.body.innerText').catch(() => '')).toLowerCase()
+    const has = body.includes(c.value.toLowerCase())
+    return c.op === '!=' ? !has : has
+  }
   if (c.key === 'selector') {
     const wc = ctx.target(target)
     if (!wc) return false
@@ -206,7 +277,7 @@ function findMenuItem(items: MenuItem[], label: string): MenuItem | null {
 }
 
 /** Commands that change something get an automatic before/after report */
-const MUTATING = new Set(['action', 'menu', 'click', 'hover', 'mouse', 'type', 'key'])
+const MUTATING = new Set(['action', 'menu', 'click', 'hover', 'mouse', 'type', 'key', 'fill', 'open'])
 
 interface Extra {
   hit?: { ok: boolean; hit: string; target: string | null }
@@ -258,21 +329,19 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       }
     }
     case 'click':
-    case 'hover': {
-      const target = wc()
-      let pt: { x: number; y: number }
-      if (p.ref) {
-        const r = await refPoint(target, Number(p.ref))
-        pt = r
-        extra.hit = await hitForRef(target, r.backendNodeId, Math.round(r.x), Math.round(r.y))
-      } else {
-        const found = (await target.executeJavaScript(locateJs(p as never))) as { x: number; y: number } | null
-        if (!found) throw new Error('Nie znaleziono elementu')
-        pt = found
-        extra.hit = await target.executeJavaScript(hitJs(Math.round(found.x), Math.round(found.y)))
+    case 'hover':
+    case 'fill': {
+      let target = wc()
+      const raw = (p.sel as string) ?? (p.ref ? String(p.ref) : p.selector ? `css:${p.selector}` : `text:${p.text}`)
+      let pt = await point(target, raw)
+      // Compact sidebar: slide it in instead of clicking into the void
+      if (targetName === 'sidebar' && !pt.hit?.ok && ctx.status().mode === 'edge') {
+        await ctx.revealSidebar()
+        target = wc()
+        pt = await point(target, raw)
       }
-      const x = Math.round(pt.x)
-      const y = Math.round(pt.y)
+      extra.hit = pt.hit
+      const { x, y } = pt
       if (extra.hit && !extra.hit.ok && !p.force) {
         const offscreen = extra.hit.hit === 'nic'
         throw new Error(
@@ -291,7 +360,32 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         target.sendInputEvent({ ...base, type: 'mouseDown', clickCount: 2 })
         target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 2 })
       }
-      return `klik @${x},${y}`
+      if (method === 'click') return `klik @${x},${y}`
+      // fill: select the field's current content so the new text replaces it
+      await sleep(60)
+      await target.executeJavaScript(`(() => {
+        const e = document.activeElement;
+        if (!e) return;
+        if ('select' in e && typeof e.select === 'function') e.select();
+        else if (e.isContentEditable) document.getSelection().selectAllChildren(e);
+      })()`)
+      target.insertText(String(p.value ?? ''))
+      await sleep(60)
+      const now = String(
+        await target.executeJavaScript(`(() => { const e = document.activeElement; return e ? (e.value ?? e.innerText ?? '') : '' })()`)
+      )
+      return `wpisano ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
+    }
+    case 'snapshot': {
+      const target = wc()
+      // Containers (regions, dialogs) often have no box of their own: skip the visibility check
+      const r = await resolve(target, p.sel as string, false)
+      if (r.kind !== 'node') throw new Error('snapshot wymaga selektora roli/nazwy albo ref')
+      return await axTree(target, { all: true, rootBackendId: r.backendNodeId })
+    }
+    case 'open': {
+      const fn = ctx.actions['open-by-name']
+      return await fn(p.name)
     }
     case 'mouse':
       wc().sendInputEvent({ type: 'mouseMove', x: Number(p.x), y: Number(p.y) })
@@ -326,11 +420,29 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       return out.join('\n')
     }
     default:
-      throw new Error('Metody: state, status, action, menu, tree, text, eval, wait, click, hover, mouse, type, key, screenshot, logs')
+      throw new Error('Metody: state, status, action, menu, open, tree, snapshot, text, eval, wait, click, hover, fill, mouse, type, key, screenshot, logs, batch')
   }
 }
 
-async function handle(ctx: ControlContext, method: string, p: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function batch(ctx: ControlContext, steps: Array<{ method: string; params: Record<string, unknown>; line?: string }>): Promise<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  let ok = true
+  for (const [i, step] of steps.entries()) {
+    const r = await handle(ctx, step.method, step.params ?? {}, false)
+    out.push({ step: i + 1, line: step.line ?? step.method, ...r })
+    if (!r.ok) {
+      ok = false
+      break
+    }
+  }
+  const response: Record<string, unknown> = { ok, steps: out, total: steps.length }
+  const errors = newErrors()
+  if (errors.length) response.errors = errors
+  response.meta = { instance: INSTANCE, seq: ctx.seq() }
+  return response
+}
+
+async function handle(ctx: ControlContext, method: string, p: Record<string, unknown>, withMeta = true): Promise<Record<string, unknown>> {
   const mutating = MUTATING.has(method)
   const before = mutating ? ctx.status() : null
   const extra: Extra = {}
@@ -347,9 +459,11 @@ async function handle(ctx: ControlContext, method: string, p: Record<string, unk
     response.changes = diff(before, after)
   }
   if (extra.hit) response.hit = extra.hit
-  const errors = newErrors()
-  if (errors.length) response.errors = errors
-  response.meta = { instance: INSTANCE, seq: ctx.seq() }
+  if (withMeta) {
+    const errors = newErrors()
+    if (errors.length) response.errors = errors
+    response.meta = { instance: INSTANCE, seq: ctx.seq() }
+  }
   return response
 }
 
@@ -367,8 +481,8 @@ export function startControl(ctx: ControlContext): void {
     req.on('end', async () => {
       let payload: Record<string, unknown>
       try {
-        const { method, params } = JSON.parse(body || '{}')
-        payload = await handle(ctx, method, params ?? {})
+        const { method, params, steps } = JSON.parse(body || '{}')
+        payload = method === 'batch' ? await batch(ctx, steps ?? []) : await handle(ctx, method, params ?? {})
       } catch (err) {
         payload = { ok: false, error: (err as Error).message, meta: { instance: INSTANCE, seq: ctx.seq() } }
       }
