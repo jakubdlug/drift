@@ -14,11 +14,23 @@ const PEEK_SHADOW = 16
 app.setName('Drift')
 nativeTheme.themeSource = 'dark'
 
+// Two instances would share (and corrupt) the same session databases
+if (!app.requestSingleInstanceLock()) app.quit()
+app.on('second-instance', (_e, argv) => {
+  if (!win) return
+  win.show()
+  win.focus()
+  for (const arg of argv.slice(1)) if (/^https?:\/\//.test(arg)) newTab(arg)
+})
+
 let win: BaseWindow
 let chrome: WebContentsView
 let tabs: TabManager
 let store: Store
 let mode: ChromeMode = 'docked'
+/** A page (e.g. a video) requested fullscreen: the tab covers the whole window */
+let htmlFullscreen = false
+let fullscreenedForPage = false
 /** Find-in-page bar; created on ⌘F and destroyed on close to save a renderer */
 let findView: WebContentsView | null = null
 const FIND_W = 380
@@ -29,6 +41,12 @@ const FIND_H = 52
 function layout(): void {
   if (!win || win.isDestroyed()) return
   const [w, h] = win.getContentSize()
+  if (htmlFullscreen) {
+    chrome.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    tabs.activeView?.setBounds({ x: 0, y: 0, width: w, height: h })
+    tabs.activeView?.setBorderRadius(0)
+    return
+  }
   const sw = store.state.settings.sidebarWidth
   const compact = store.state.settings.compact
   const fullscreen = win.isFullScreen()
@@ -476,7 +494,18 @@ function createWindow(): void {
   tabs = new TabManager(win, store, {
     onChange: push,
     layout,
-    openInNewTab: (url) => newTab(url),
+    openInNewTab: (url, background) => newTab(url, store.activeWorkspace, !background),
+    htmlFullscreen: (on) => {
+      htmlFullscreen = on
+      if (on && !win.isFullScreen()) {
+        fullscreenedForPage = true
+        win.setFullScreen(true)
+      } else if (!on && fullscreenedForPage) {
+        fullscreenedForPage = false
+        win.setFullScreen(false)
+      }
+      layout()
+    },
     onFound: (result) => {
       findView?.webContents.send('found', { active: result.activeMatchOrdinal, total: result.matches })
     }

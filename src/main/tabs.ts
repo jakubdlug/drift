@@ -1,4 +1,7 @@
-import { BaseWindow, WebContentsView, session, shell, type Session } from 'electron'
+import { app, BaseWindow, WebContentsView, session, shell, type Session } from 'electron'
+import { existsSync } from 'fs'
+import { join, parse } from 'path'
+import { showPageMenu } from './page-menu'
 import type { ItemId, RuntimeTab } from '@shared/types'
 import type { Store } from './store'
 
@@ -25,7 +28,8 @@ export class TabManager {
     private hooks: {
       onChange: () => void
       layout: () => void
-      openInNewTab: (url: string, openerId: ItemId) => void
+      openInNewTab: (url: string, background: boolean) => void
+      htmlFullscreen: (on: boolean) => void
       onFound: (result: Electron.Result) => void
     }
   ) {
@@ -55,6 +59,18 @@ export class TabManager {
       ses.setUserAgent(ses.getUserAgent().replace(/\s?Electron\/\S+/, '').replace(/\s?drift\/\S+/i, ''))
       ses.setPermissionRequestHandler((_wc, permission, cb) => {
         cb(['clipboard-read', 'clipboard-sanitized-write', 'notifications', 'fullscreen', 'media', 'pointerLock'].includes(permission))
+      })
+      ses.setSpellCheckerLanguages(['pl', 'en-US'])
+      ses.on('will-download', (_e, item) => {
+        // Straight to ~/Downloads without a dialog, never overwriting
+        const dir = app.getPath('downloads')
+        const { name, ext } = parse(item.getFilename())
+        let target = join(dir, `${name}${ext}`)
+        for (let i = 1; existsSync(target); i++) target = join(dir, `${name} (${i})${ext}`)
+        item.setSavePath(target)
+        item.once('done', (_ev, state) => {
+          if (state === 'completed') app.dock?.downloadFinished(target)
+        })
       })
     }
     return ses
@@ -119,6 +135,15 @@ export class TabManager {
       if (item && (this.store.isToday(id) || !item.favicon)) this.store.update(id, { favicon: icon })
       this.emit()
     })
+    wc.on('context-menu', (_e, params) =>
+      showPageMenu(wc, params, {
+        win: this.win,
+        openTab: (u, background) => this.hooks.openInNewTab(u, background),
+        searchUrl: this.store.state.settings.searchUrl
+      })
+    )
+    wc.on('enter-html-full-screen', () => this.hooks.htmlFullscreen(true))
+    wc.on('leave-html-full-screen', () => this.hooks.htmlFullscreen(false))
     wc.on('found-in-page', (_e, result) => this.hooks.onFound(result))
     wc.on('audio-state-changed', (e) => {
       tab.info.audible = e.audible
@@ -139,7 +164,7 @@ export class TabManager {
           overrideBrowserWindowOptions: { width: 520, height: 700, parent: this.win, webPreferences: { session: wc.session } }
         }
       }
-      if (/^https?:/.test(target)) this.hooks.openInNewTab(target, id)
+      if (/^https?:/.test(target)) this.hooks.openInNewTab(target, disposition === 'background-tab')
       else shell.openExternal(target)
       return { action: 'deny' }
     })
