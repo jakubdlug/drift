@@ -26,6 +26,7 @@ export class TabManager {
       onChange: () => void
       layout: () => void
       openInNewTab: (url: string, openerId: ItemId) => void
+      onFound: (result: Electron.Result) => void
     }
   ) {
     setInterval(() => this.sleepIdle(), 60_000)
@@ -118,6 +119,7 @@ export class TabManager {
       if (item && (this.store.isToday(id) || !item.favicon)) this.store.update(id, { favicon: icon })
       this.emit()
     })
+    wc.on('found-in-page', (_e, result) => this.hooks.onFound(result))
     wc.on('audio-state-changed', (e) => {
       tab.info.audible = e.audible
       this.emit()

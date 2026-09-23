@@ -11,18 +11,46 @@
     "start": "electron-vite preview",
     "import:arc": "electron-vite build && electron . --import-arc",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && svelte-check --tsconfig tsconfig.web.json",
-    "dist": "electron-vite build && electron-builder --mac --dir"
+    "dist": "electron-vite build && electron-builder --mac --dir",
+    "ctl": "node scripts/drift-ctl"
   },
   "build": {
     "appId": "com.teceer.drift",
     "productName": "Drift",
-    "mac": {
-      "category": "public.app-category.productivity",
-      "target": "dir"
+    "directories": {
+      "output": "dist"
     },
     "files": [
       "out/**/*"
-    ]
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dir",
+      "icon": "resources/icon.icns",
+      "extendInfo": {
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLName": "Web site URL",
+            "CFBundleURLSchemes": [
+              "http",
+              "https"
+            ]
+          }
+        ],
+        "CFBundleDocumentTypes": [
+          {
+            "CFBundleTypeName": "HTML document",
+            "CFBundleTypeRole": "Viewer",
+            "LSItemContentTypes": [
+              "public.html",
+              "public.xhtml"
+            ]
+          }
+        ],
+        "NSMicrophoneUsageDescription": "Strony internetowe mogą prosić o dostęp do mikrofonu.",
+        "NSCameraUsageDescription": "Strony internetowe mogą prosić o dostęp do kamery."
+      }
+    }
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.4",

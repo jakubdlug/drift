@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import type { ChromeMode, DropTarget, ItemId, Snapshot, Workspace } from '@shared/types'
 import { arcAvailable, copyStorage, importCookies, importHistory, importSidebar } from './arc-import'
+import { captureConsole, startControl } from './control'
 import { buildMenu } from './menu'
 import { saveStateNow, statePath, Store } from './store'
 import { TabManager } from './tabs'
@@ -18,6 +19,10 @@ let chrome: WebContentsView
 let tabs: TabManager
 let store: Store
 let mode: ChromeMode = 'docked'
+/** Find-in-page bar; created on ⌘F and destroyed on close to save a renderer */
+let findView: WebContentsView | null = null
+const FIND_W = 380
+const FIND_H = 52
 
 // ---------- layout ----------
 
@@ -40,11 +45,49 @@ function layout(): void {
   const left = compact ? gap : sw
   tabs.activeView?.setBounds({ x: left, y: gap, width: Math.max(0, w - left - gap), height: Math.max(0, h - gap * 2) })
   tabs.activeView?.setBorderRadius(gap ? 8 : 0)
+  findView?.setBounds({ x: w - FIND_W - gap - 8, y: gap + 8, width: FIND_W, height: FIND_H })
 
   // Traffic lights live in the sidebar, so they hide with it
   win.setWindowButtonVisibility(mode !== 'edge')
-  // Keep the sidebar above the page
+  // Keep the sidebar and find bar above the page
   win.contentView.addChildView(chrome)
+  if (findView) win.contentView.addChildView(findView)
+}
+
+function loadRenderer(view: WebContentsView, hash = ''): void {
+  if (process.env.ELECTRON_RENDERER_URL) view.webContents.loadURL(`${process.env.ELECTRON_RENDERER_URL}#${hash}`)
+  else view.webContents.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+}
+
+function openFind(): void {
+  if (!tabs.webContents()) return
+  if (findView) {
+    findView.webContents.focus()
+    findView.webContents.send('command', { type: 'find-focus' })
+    return
+  }
+  findView = new WebContentsView({
+    webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: false, contextIsolation: true }
+  })
+  findView.setBackgroundColor('#00000000')
+  captureConsole(findView.webContents, 'find')
+  loadRenderer(findView, 'find')
+  findView.webContents.once('did-finish-load', () => findView?.webContents.focus())
+  layout()
+}
+
+function closeFind(): void {
+  if (!findView) return
+  tabs.webContents()?.stopFindInPage('clearSelection')
+  win.contentView.removeChildView(findView)
+  findView.webContents.close()
+  findView = null
+  tabs.webContents()?.focus()
+}
+
+function findStep(forward: boolean): void {
+  if (findView) findView.webContents.send('command', { type: forward ? 'find-next' : 'find-prev' })
+  else openFind()
 }
 
 function setMode(next: ChromeMode): void {
@@ -89,6 +132,7 @@ function openItem(id: ItemId): void {
     store.update(id, { collapsed: !item.collapsed })
     return
   }
+  if (id !== activeItemId()) closeFind()
   store.setActive(store.activeWorkspace.id, id)
   tabs.show(id)
 }
@@ -124,6 +168,7 @@ function activeItemId(): ItemId | null {
 
 function switchWorkspace(id: string): void {
   if (!store.workspace(id) || id === store.state.activeWorkspaceId) return
+  closeFind()
   tabs.detach()
   store.state.activeWorkspaceId = id
   store.changed()
@@ -335,9 +380,13 @@ function clearToday(): void {
 
 // ---------- IPC ----------
 
+/** Every IPC action, also exposed to the local control channel */
+const handlers: Record<string, (...args: unknown[]) => unknown> = {}
+
 function registerIpc(): void {
   const on = (channel: string, fn: (...args: never[]) => unknown): void => {
-    ipcMain.handle(channel, (_e, ...args) => (fn as (...a: unknown[]) => unknown)(...args))
+    handlers[channel] = fn as (...a: unknown[]) => unknown
+    ipcMain.handle(channel, (_e, ...args) => handlers[channel](...args))
   }
   on('snapshot', () => ({ state: store.state, tabs: tabs.runtime(), mode }) satisfies Snapshot)
   on('open-item', (id: ItemId) => openItem(id))
@@ -377,6 +426,14 @@ function registerIpc(): void {
   on('copy-url', () => clipboard.writeText(tabs.webContents()?.getURL() ?? ''))
   on('restore-archived', (index: number) => restoreArchived(index))
   on('focus-page', () => tabs.webContents()?.focus())
+  on('find', (text: string, forward: boolean, findNext: boolean) => {
+    const wc = tabs.webContents()
+    if (!wc) return
+    if (text) wc.findInPage(text, { forward, findNext })
+    else wc.stopFindInPage('clearSelection')
+  })
+  on('find-close', () => closeFind())
+  on('open-find', () => openFind())
 }
 
 function toggleCompact(): void {
@@ -419,33 +476,17 @@ function createWindow(): void {
   tabs = new TabManager(win, store, {
     onChange: push,
     layout,
-    openInNewTab: (url) => newTab(url)
+    openInNewTab: (url) => newTab(url),
+    onFound: (result) => {
+      findView?.webContents.send('found', { active: result.activeMatchOrdinal, total: result.matches })
+    }
   })
 
-  if (process.env.ELECTRON_RENDERER_URL) chrome.webContents.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else chrome.webContents.loadFile(join(__dirname, '../renderer/index.html'))
+  captureConsole(chrome.webContents, 'sidebar')
+  loadRenderer(chrome)
 
   chrome.webContents.once('did-finish-load', () => {
     win.show()
-    // Dev aid: DRIFT_SHOT=/path/prefix writes PNGs of the sidebar and page
-    const shot = process.env.DRIFT_SHOT
-    if (process.env.DRIFT_EVAL) setTimeout(() => chrome.webContents.executeJavaScript(process.env.DRIFT_EVAL!), 800)
-    if (process.env.DRIFT_LOG_TABS) {
-      setTimeout(() => {
-        for (const t of Object.values(tabs.runtime())) console.log(`TAB ${t.title} | ${t.url}`)
-        const byPid = new Map(webContents.getAllWebContents().map((wc) => [wc.getOSProcessId(), wc.getURL().slice(0, 60)]))
-        for (const m of app.getAppMetrics())
-          console.log(`MEM ${Math.round(m.memory.workingSetSize / 1024)}MB ${m.type} ${byPid.get(m.pid) ?? m.serviceName ?? ''}`)
-      }, Number(process.env.DRIFT_SHOT_DELAY ?? 4000))
-    }
-    if (shot) {
-      setTimeout(async () => {
-        const { writeFileSync } = await import('fs')
-        writeFileSync(`${shot}-sidebar.png`, (await chrome.webContents.capturePage()).toPNG())
-        const page = tabs.webContents()
-        if (page) writeFileSync(`${shot}-page.png`, (await page.capturePage()).toPNG())
-      }, Number(process.env.DRIFT_SHOT_DELAY ?? 4000))
-    }
     const active = activeItemId()
     if (active) tabs.show(active)
     push()
@@ -490,10 +531,46 @@ function createWindow(): void {
       cycleWorkspace,
       devtoolsPage: () => tabs.webContents()?.toggleDevTools(),
       devtoolsChrome: () => chrome.webContents.toggleDevTools(),
+      find: openFind,
+      findNext: () => findStep(true),
+      findPrev: () => findStep(false),
+      setDefaultBrowser: () => {
+        app.setAsDefaultProtocolClient('http')
+        app.setAsDefaultProtocolClient('https')
+      },
       newFolder: () => store.createFolder(),
       newWorkspace
     })
   )
+}
+
+/** Compact, favicon-free view of the state for the control channel */
+function controlSummary(): unknown {
+  const s = store.state
+  const ws = store.activeWorkspace
+  const rt = tabs.runtime()
+  const line = (id: ItemId, depth = 0): string[] => {
+    const it = s.items[id]
+    if (!it) return []
+    const pad = '  '.repeat(depth)
+    if (it.kind === 'folder')
+      return [`${pad}📁 ${it.title} [${id}]${it.collapsed ? ' (zwinięty)' : ''}`, ...(it.children ?? []).flatMap((c) => line(c, depth + 1))]
+    const live = rt[id] ? (rt[id].sleeping ? ' 💤' : ' ●') : ''
+    return [`${pad}${it.title} — ${it.url} [${id}]${live}`]
+  }
+  const active = activeItemId()
+  return {
+    mode,
+    compact: s.settings.compact,
+    workspace: `${ws.emoji ?? ''} ${ws.name} [${ws.id}] profil=${ws.profileId}`,
+    workspaces: s.workspaces.map((w) => `${w.emoji ?? ''} ${w.name} [${w.id}]`),
+    activeTab: active ? { id: active, title: rt[active]?.title ?? s.items[active]?.title, url: rt[active]?.url } : null,
+    findOpen: !!findView,
+    essentials: (s.essentials[ws.profileId] ?? []).flatMap((id) => line(id)),
+    pinned: ws.pinned.flatMap((id) => line(id)),
+    today: ws.today.flatMap((id) => line(id)),
+    loadedTabs: Object.values(rt).filter((t) => !t.sleeping).length
+  }
 }
 
 // ---------- startup ----------
@@ -521,6 +598,21 @@ async function runArcImport(): Promise<void> {
     .catch((err) => log(`  ! ciasteczka pominięte: ${(err as Error).message}`))
 }
 
+// Links from other apps (when Drift is the default browser) can arrive before the window exists
+const pendingUrls: string[] = []
+let ready = false
+app.on('open-url', (e, url) => {
+  e.preventDefault()
+  if (ready) newTab(url)
+  else pendingUrls.push(url)
+})
+app.on('open-file', (e, path) => {
+  e.preventDefault()
+  const url = `file://${path}`
+  if (ready) newTab(url)
+  else pendingUrls.push(url)
+})
+
 app.whenReady().then(async () => {
   store = new Store()
   const firstRun = !existsSync(statePath())
@@ -529,8 +621,21 @@ app.whenReady().then(async () => {
   }
   registerIpc()
   createWindow()
+  if (!app.isPackaged || process.argv.includes('--control')) {
+    startControl({
+      target: (name) =>
+        name === 'page' ? tabs.webContents() : name === 'find' ? (findView?.webContents ?? null) : chrome.webContents,
+      actions: handlers,
+      summary: controlSummary
+    })
+  }
+  chrome.webContents.once('did-finish-load', () => {
+    ready = true
+    for (const url of pendingUrls.splice(0)) newTab(url)
+  })
   setInterval(archiveStale, 10 * 60_000)
 })
 
 app.on('before-quit', () => store?.flush())
 app.on('window-all-closed', () => app.quit())
+app.on('activate', () => win?.show())

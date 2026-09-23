@@ -19,6 +19,10 @@ export interface MenuActions {
   devtoolsChrome: () => void
   newFolder: () => void
   newWorkspace: () => void
+  find: () => void
+  findNext: () => void
+  findPrev: () => void
+  setDefaultBrowser: () => void
 }
 
 export function buildMenu(a: MenuActions): Menu {
@@ -29,7 +33,21 @@ export function buildMenu(a: MenuActions): Menu {
   }))
 
   return Menu.buildFromTemplate([
-    { role: 'appMenu' },
+    {
+      role: 'appMenu',
+      submenu: [
+        { role: 'about' },
+        { label: 'Ustaw jako domyślną przeglądarkę', click: a.setDefaultBrowser },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
     {
       label: 'Plik',
       submenu: [
@@ -52,6 +70,10 @@ export function buildMenu(a: MenuActions): Menu {
         { role: 'paste' },
         { role: 'pasteAndMatchStyle' },
         { role: 'selectAll' },
+        { type: 'separator' },
+        { label: 'Znajdź na stronie', accelerator: 'Cmd+F', click: a.find },
+        { label: 'Następne wystąpienie', accelerator: 'Cmd+G', click: a.findNext },
+        { label: 'Poprzednie wystąpienie', accelerator: 'Cmd+Shift+G', click: a.findPrev },
         { type: 'separator' },
         { label: 'Kopiuj URL', accelerator: 'Cmd+Shift+C', click: a.copyUrl }
       ]

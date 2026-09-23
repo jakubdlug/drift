@@ -41,3 +41,18 @@ Nie są importowane: hasła, rozszerzenia, Boosts, Easels.
 - `src/main/index.ts` — okno (`BaseWindow`), layout, IPC, archiwizacja Today po `archiveAfterHours`
 - `src/main/arc-import.ts` — import z Arca
 - `src/renderer` — sidebar w Svelte 5, rysowany w osobnym przezroczystym `WebContentsView` nad stroną
+
+## Sterowanie z zewnątrz (dla agentów i skryptów)
+
+W trybie deweloperskim (albo z flagą `--control`) Drift wystawia kanał sterowania na `127.0.0.1` z losowym tokenem w `~/Library/Application Support/Drift/control.json` (0600).
+
+```bash
+scripts/drift-ctl state                 # workspace, aktywna karta, pinned/today
+scripts/drift-ctl tree sidebar          # elementy z numerami [ref]
+scripts/drift-ctl click sidebar 24      # klik po ref (albo po tekście, --right, --double)
+scripts/drift-ctl menu "Nowa karta"     # pozycja menu aplikacji
+scripts/drift-ctl type sidebar github   # wpisywanie
+scripts/drift-ctl key sidebar Enter     # klawisze (--mod cmd,shift)
+scripts/drift-ctl text page             # tekst aktywnej strony
+scripts/drift-ctl logs                  # błędy konsoli sidebara
+```

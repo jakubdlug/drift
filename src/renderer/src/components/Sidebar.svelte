@@ -73,9 +73,9 @@
     <div class="traffic"></div>
     <button class="ib" title="Ukryj sidebar (⌘S)" onclick={actions.toggleCompact}><Icon name="sidebar" /></button>
     <div class="spacer"></div>
-    <button class="ib" disabled={!rt?.canGoBack} onclick={() => actions.nav('back')}><Icon name="back" /></button>
-    <button class="ib" disabled={!rt?.canGoForward} onclick={() => actions.nav('forward')}><Icon name="forward" /></button>
-    <button class="ib" onclick={() => actions.nav('reload')}><Icon name="reload" /></button>
+    <button class="ib" title="Wstecz (⌘[)" disabled={!rt?.canGoBack} onclick={() => actions.nav('back')}><Icon name="back" /></button>
+    <button class="ib" title="Dalej (⌘])" disabled={!rt?.canGoForward} onclick={() => actions.nav('forward')}><Icon name="forward" /></button>
+    <button class="ib" title="Odśwież (⌘R)" onclick={() => actions.nav('reload')}><Icon name="reload" /></button>
   </header>
 
   <div class="url" role="button" tabindex="0" onclick={() => onpalette(current ? 'edit' : 'new')} onkeydown={() => {}}>

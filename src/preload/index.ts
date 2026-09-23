@@ -6,6 +6,9 @@ const api = {
   onSnapshot: (fn: (s: Snapshot) => void): void => {
     ipcRenderer.on('snapshot', (_e, s: Snapshot) => fn(s))
   },
+  onFound: (fn: (r: { active: number; total: number }) => void): void => {
+    ipcRenderer.on('found', (_e, r) => fn(r))
+  },
   onCommand: (fn: (cmd: Record<string, string>) => void): void => {
     ipcRenderer.on('command', (_e, cmd) => fn(cmd))
   }

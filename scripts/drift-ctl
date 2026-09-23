@@ -1,0 +1,121 @@
+#!/usr/bin/env node
+// CLI for Drift's local control channel. Run `drift-ctl help` for usage.
+const { readFileSync } = require('fs')
+const { join } = require('path')
+const { homedir } = require('os')
+
+const USAGE = `drift-ctl <komenda> [target] [argumenty]
+
+target: sidebar (domyślnie) | page | find
+
+  state                         stan: workspace, aktywna karta, pinned/today
+  tree [target]                 interaktywne elementy z numerami [ref]
+  text [target]                 innerText widoku
+  click <target> <ref|tekst>    klik (--right, --double, --sel <css>, --mod cmd,shift)
+  hover <target> <ref|tekst>    najechanie myszą
+  type <target> <tekst>         wpisz tekst w element z fokusem
+  key <target> <Klawisz>        np. Enter, Escape, Down, a (--mod cmd,shift)
+  menu "<etykieta>"             kliknij pozycję menu aplikacji, np. "Nowa karta"
+  action <nazwa> [args…]        wywołaj akcję IPC (args jako JSON lub tekst)
+  eval <target> <kod>           wykonaj JS w widoku
+  screenshot [target] [ścieżka] zrzut PNG (tylko gdy naprawdę potrzebny)
+  logs [--clear]                logi konsoli sidebara i paska wyszukiwania`
+
+const argv = process.argv.slice(2)
+const flags = {}
+const pos = []
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i]
+  if (a === '--right' || a === '--double' || a === '--clear') flags[a.slice(2)] = true
+  else if (a === '--sel' || a === '--mod') flags[a.slice(2)] = argv[++i]
+  else pos.push(a)
+}
+const [cmd, ...rest] = pos
+if (!cmd || cmd === 'help') {
+  console.log(USAGE)
+  process.exit(0)
+}
+
+const TARGETS = ['sidebar', 'page', 'find']
+const takeTarget = () => (TARGETS.includes(rest[0]) ? rest.shift() : 'sidebar')
+const parse = (v) => {
+  try {
+    return JSON.parse(v)
+  } catch {
+    return v
+  }
+}
+const selector = (v) => (flags.sel ? { selector: flags.sel } : /^\d+$/.test(v ?? '') ? { ref: Number(v) } : { text: v })
+const modifiers = flags.mod ? flags.mod.split(',') : undefined
+
+let method = cmd
+let params = {}
+switch (cmd) {
+  case 'tree':
+  case 'text':
+    params = { target: takeTarget() }
+    break
+  case 'click':
+  case 'hover': {
+    const target = takeTarget()
+    params = { target, ...selector(rest.join(' ')), button: flags.right ? 'right' : 'left', double: !!flags.double, modifiers }
+    break
+  }
+  case 'type': {
+    const target = takeTarget()
+    params = { target, text: rest.join(' ') }
+    break
+  }
+  case 'key': {
+    const target = takeTarget()
+    params = { target, key: rest[0], modifiers }
+    break
+  }
+  case 'menu':
+    params = { label: rest.join(' ') }
+    break
+  case 'action':
+    params = { name: rest[0], args: rest.slice(1).map(parse) }
+    break
+  case 'eval': {
+    const target = takeTarget()
+    params = { target, code: rest.join(' ') }
+    break
+  }
+  case 'screenshot': {
+    const target = takeTarget()
+    params = { target, path: rest[0] }
+    break
+  }
+  case 'logs':
+    params = { clear: !!flags.clear }
+    break
+}
+
+let conf
+try {
+  conf = JSON.parse(readFileSync(join(homedir(), 'Library/Application Support/Drift/control.json'), 'utf8'))
+  process.kill(conf.pid, 0)
+} catch {
+  console.error('Drift nie działa albo kanał sterowania jest wyłączony (npm run dev lub --control).')
+  process.exit(2)
+}
+
+fetch(`http://127.0.0.1:${conf.port}/`, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${conf.token}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ method, params })
+})
+  .then((r) => r.json())
+  .then((r) => {
+    if (!r.ok) {
+      console.error(`Błąd: ${r.error}`)
+      process.exit(1)
+    }
+    const out = r.result
+    console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 2))
+  })
+  .catch((e) => {
+    console.error(`Brak połączenia: ${e.message}`)
+    process.exit(2)
+  })
