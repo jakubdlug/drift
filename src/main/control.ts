@@ -139,6 +139,10 @@ async function handle(ctx: ControlContext, method: string, p: Record<string, unk
       target.sendInputEvent({ type: 'mouseMove', x: Math.round(pt.x), y: Math.round(pt.y) })
       return 'ok'
     }
+    case 'mouse': {
+      wc().sendInputEvent({ type: 'mouseMove', x: Number(p.x), y: Number(p.y) })
+      return 'ok'
+    }
     case 'type': {
       const target = wc()
       target.focus()
@@ -167,7 +171,7 @@ async function handle(ctx: ControlContext, method: string, p: Record<string, unk
       return out.join('\n')
     }
     default:
-      throw new Error('Metody: state, action, menu, tree, text, eval, click, hover, type, key, screenshot, logs')
+      throw new Error('Metody: state, action, menu, tree, text, eval, click, hover, mouse, type, key, screenshot, logs')
   }
 }
 

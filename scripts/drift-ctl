@@ -13,6 +13,7 @@ target: sidebar (domyślnie) | page | find
   text [target]                 innerText widoku
   click <target> <ref|tekst>    klik (--right, --double, --sel <css>, --mod cmd,shift)
   hover <target> <ref|tekst>    najechanie myszą
+  mouse <target> <x> <y>        przesuń mysz do współrzędnych widoku
   type <target> <tekst>         wpisz tekst w element z fokusem
   key <target> <Klawisz>        np. Enter, Escape, Down, a (--mod cmd,shift)
   menu "<etykieta>"             kliknij pozycję menu aplikacji, np. "Nowa karta"
@@ -59,6 +60,11 @@ switch (cmd) {
   case 'hover': {
     const target = takeTarget()
     params = { target, ...selector(rest.join(' ')), button: flags.right ? 'right' : 'left', double: !!flags.double, modifiers }
+    break
+  }
+  case 'mouse': {
+    const target = takeTarget()
+    params = { target, x: rest[0], y: rest[1] }
     break
   }
   case 'type': {

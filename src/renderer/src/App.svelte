@@ -9,18 +9,24 @@
   let editingWorkspace = $state<string | null>(null)
   let hideTimer: ReturnType<typeof setTimeout> | undefined
 
-  window.drift.invoke('snapshot').then((s) => (app.snap = s as Snapshot))
-  window.drift.onSnapshot((s) => (app.snap = s))
+  window.drift.invoke('snapshot').then((s) => {
+    app.snap = s as Snapshot
+  })
+  window.drift.onSnapshot((s) => {
+    app.snap = s
+  })
   window.drift.onCommand((cmd) => {
     if (cmd.type === 'palette') openPalette(cmd.mode as 'new' | 'edit')
     if (cmd.type === 'rename') {
       renaming = cmd.id
-      if (app.snap?.mode === 'edge') actions.setMode('peek')
+      if (app.snap?.state.settings.compact) peek()
     }
     if (cmd.type === 'edit-workspace') editingWorkspace = cmd.id
   })
 
   async function openPalette(mode: 'new' | 'edit'): Promise<void> {
+    // The palette covers the window; after it the overlay starts closed again
+    peekOpen = false
     await actions.palette(true)
     palette = mode
   }
@@ -31,25 +37,56 @@
     actions.focusPage()
   }
 
+  // Compact mode: the overlay stays mounted and only slides, so hovering the edge is instant
+  let peekOpen = $state(false)
+
+  // Docking (⌘S) ends any peek; a stale "open" would break the next hover
+  $effect(() => {
+    if (app.snap?.mode === 'docked') peekOpen = false
+  })
+
+  async function peek(): Promise<void> {
+    clearTimeout(hideTimer)
+    if (peekOpen) return
+    // Grow the native view first, then start the slide on a painted frame
+    await actions.setMode('peek')
+    requestAnimationFrame(() => requestAnimationFrame(() => (peekOpen = true)))
+  }
+
+  function scheduleHide(): void {
+    clearTimeout(hideTimer)
+    hideTimer = setTimeout(() => {
+      if (!renaming && !editingWorkspace) peekOpen = false
+    }, 250)
+  }
+
+  function onSlideEnd(e: TransitionEvent): void {
+    // Shrink the view back to the hot-zone only once the panel is fully out
+    if (e.target === e.currentTarget && e.propertyName === 'transform' && !peekOpen) actions.setMode('edge')
+  }
+
   const snap = $derived(app.snap)
-  const compact = $derived(snap?.state.settings.compact ?? false)
+  const overlay = $derived(
+    !!snap && (snap.mode === 'edge' || snap.mode === 'peek' || (snap.mode === 'full' && snap.state.settings.compact))
+  )
   const width = $derived(snap?.state.settings.sidebarWidth ?? 264)
 </script>
 
 {#if snap}
   <div class="root" style="{themeVars(workspace(snap).color)}--sw:{width}px">
-    {#if snap.mode === 'edge'}
-      <div class="edge" role="presentation" onmouseenter={() => actions.setMode('peek')}></div>
-    {:else if snap.mode === 'peek'}
+    {#if overlay}
+      <div class="edge" role="presentation" onmouseenter={peek}></div>
       <div
-        class="panel peek"
+        class="panel overlay"
+        class:open={peekOpen}
         role="presentation"
-        onmouseenter={() => clearTimeout(hideTimer)}
-        onmouseleave={() => (hideTimer = setTimeout(() => !renaming && !editingWorkspace && actions.setMode('edge'), 180))}
+        onmouseenter={peek}
+        onmouseleave={scheduleHide}
+        ontransitionend={onSlideEnd}
       >
         <Sidebar {snap} bind:renaming bind:editingWorkspace onpalette={openPalette} />
       </div>
-    {:else if !(snap.mode === 'full' && compact)}
+    {:else}
       <div class="panel"><Sidebar {snap} bind:renaming bind:editingWorkspace onpalette={openPalette} /></div>
     {/if}
 
@@ -62,14 +99,21 @@
 {/if}
 
 <style>
-  .root { height: 100%; }
+  .root { position: relative; height: 100%; }
   .panel { width: var(--sw); height: 100%; }
-  .peek {
+  .edge { position: absolute; inset: 0 auto 0 0; width: 8px; background: var(--ws); }
+  .overlay {
+    position: absolute;
+    inset: 0 auto 0 0;
     border-radius: 0 12px 12px 0;
     overflow: hidden;
-    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.45);
-    animation: slide 0.14s ease-out;
+    box-shadow: 6px 0 24px rgba(0, 0, 0, 0.45);
+    transform: translateX(calc(-100% - 28px));
+    transition: transform 170ms cubic-bezier(0.4, 0, 1, 1);
+    will-change: transform;
   }
-  @keyframes slide { from { transform: translateX(-24px); opacity: 0.4; } }
-  .edge { width: 100%; height: 100%; background: var(--ws); }
+  .overlay.open {
+    transform: none;
+    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
 </style>

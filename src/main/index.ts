@@ -49,6 +49,10 @@ let fullscreenedForPage = false
 let findView: WebContentsView | null = null
 const FIND_W = 380
 const FIND_H = 52
+/** 1 = sidebar docked, 0 = hidden; animated between the two on ⌘S */
+let reveal = 1
+let revealTimer: NodeJS.Timeout | null = null
+const REVEAL_MS = 220
 
 // ---------- layout ----------
 
@@ -62,19 +66,19 @@ function layout(): void {
     return
   }
   const sw = store.state.settings.sidebarWidth
-  const compact = store.state.settings.compact
   const fullscreen = win.isFullScreen()
-  const gap = fullscreen && compact ? 0 : GAP
+  const gap = fullscreen && reveal === 0 ? 0 : GAP
 
   const chromeBounds = {
-    docked: { x: 0, y: 0, width: sw, height: h },
+    // While animating, the docked sidebar slides out to the left in step with the page
+    docked: { x: Math.round(-sw * (1 - reveal)), y: 0, width: sw, height: h },
     edge: { x: 0, y: 0, width: GAP, height: h },
     peek: { x: 0, y: 0, width: sw + PEEK_SHADOW, height: h },
     full: { x: 0, y: 0, width: w, height: h }
   }[mode]
   chrome.setBounds(chromeBounds)
 
-  const left = compact ? gap : sw
+  const left = Math.round(gap + (sw - gap) * reveal)
   tabs.activeView?.setBounds({ x: left, y: gap, width: Math.max(0, w - left - gap), height: Math.max(0, h - gap * 2) })
   tabs.activeView?.setBorderRadius(gap ? 8 : 0)
   findView?.setBounds({ x: w - FIND_W - gap - 8, y: gap + 8, width: FIND_W, height: FIND_H })
@@ -468,10 +472,35 @@ function registerIpc(): void {
   on('open-find', () => openFind())
 }
 
+function animateReveal(to: number, done?: () => void): void {
+  if (revealTimer) clearInterval(revealTimer)
+  const from = reveal
+  const start = Date.now()
+  revealTimer = setInterval(() => {
+    const t = Math.min(1, (Date.now() - start) / REVEAL_MS)
+    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+    reveal = from + (to - from) * eased
+    layout()
+    if (t === 1) {
+      clearInterval(revealTimer!)
+      revealTimer = null
+      done?.()
+    }
+  }, 1000 / 60)
+}
+
 function toggleCompact(): void {
-  store.state.settings.compact = !store.state.settings.compact
+  const compact = !store.state.settings.compact
+  store.state.settings.compact = compact
   store.changed()
-  applyCompact()
+  if (compact) {
+    // Slide the docked sidebar away first, then switch to the edge hot-zone
+    setMode('docked')
+    animateReveal(0, () => store.state.settings.compact && setMode('edge'))
+  } else {
+    setMode('docked')
+    animateReveal(1)
+  }
 }
 
 function restoreArchived(index = 0): void {
@@ -541,6 +570,7 @@ function createWindow(): void {
   win.on('focus', () => tabs.webContents()?.focus())
 
   store.onChange(push)
+  reveal = store.state.settings.compact ? 0 : 1
   applyCompact()
   layout()
 
