@@ -45,7 +45,7 @@ function readJson<T>(path: string): T | null {
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as T
   } catch (err) {
-    console.error(`Nie udało się odczytać ${path}:`, err)
+    console.error(`Failed to read ${path}:`, err)
     return null
   }
 }
@@ -56,8 +56,23 @@ function writeJsonAtomic(path: string, data: unknown): void {
   renameSync(tmp, path)
 }
 
+/** Incognito tabs live only in memory: strip them from everything written to disk */
+function persistable(state: State): State {
+  const incognito = new Set(Object.values(state.items).filter((i) => i.incognito).map((i) => i.id))
+  if (!incognito.size) return state
+  const keep = (ids: ItemId[]): ItemId[] => ids.filter((id) => !incognito.has(id))
+  return {
+    ...state,
+    items: Object.fromEntries(Object.entries(state.items).filter(([id]) => !incognito.has(id))),
+    workspaces: state.workspaces.map((w) => ({ ...w, today: keep(w.today), pinned: keep(w.pinned) })),
+    activeItemByWorkspace: Object.fromEntries(
+      Object.entries(state.activeItemByWorkspace).map(([ws, id]) => [ws, id && incognito.has(id) ? null : id])
+    )
+  }
+}
+
 export function saveStateNow(state: State): void {
-  writeJsonAtomic(statePath(), state)
+  writeJsonAtomic(statePath(), persistable(state))
 }
 
 /**
@@ -154,15 +169,15 @@ export class Store {
 
   // ---- mutations ----
 
-  createTab(url: string, title = url, workspace = this.activeWorkspace): Item {
-    const item: Item = { id: randomUUID(), kind: 'tab', title, url, createdAt: Date.now(), lastActiveAt: Date.now() }
+  createTab(url: string, title = url, workspace = this.activeWorkspace, incognito = false): Item {
+    const item: Item = { id: randomUUID(), kind: 'tab', title, url, createdAt: Date.now(), lastActiveAt: Date.now(), ...(incognito ? { incognito: true } : {}) }
     this.state.items[item.id] = item
     workspace.today.unshift(item.id)
     this.changed()
     return item
   }
 
-  createFolder(title = 'Nowy folder', target?: DropTarget): Item {
+  createFolder(title = 'New folder', target?: DropTarget): Item {
     const item: Item = { id: randomUUID(), kind: 'folder', title, children: [], createdAt: Date.now() }
     this.state.items[item.id] = item
     this.insert(item.id, target ?? { zone: 'pinned', index: 0 })
@@ -194,6 +209,11 @@ export class Store {
 
   archive(id: ItemId): void {
     const item = this.state.items[id]
+    // Private tabs leave no trace
+    if (item?.incognito) {
+      this.remove(id)
+      return
+    }
     const loc = this.locate(id)
     if (item?.url && loc?.workspace) {
       this.state.archive.unshift({
@@ -229,6 +249,8 @@ export class Store {
   move(id: ItemId, target: DropTarget): void {
     const item = this.state.items[id]
     if (!item) return
+    // Incognito tabs stay in Today: pinning would persist them
+    if (item.incognito && target.zone !== 'today') return
     // Folders can't go into essentials or into themselves
     if (item.kind === 'folder' && (target.zone === 'essentials' || target.zone === 'today')) return
     if (target.zone === 'folder' && target.parentId && this.isDescendant(target.parentId, id)) return
@@ -257,14 +279,19 @@ export class Store {
     this.changed()
   }
 
+  /** Tab that was active before the current one, per workspace (where closing a tab returns to) */
+  previousActive: Record<string, ItemId | null> = {}
+
   setActive(workspaceId: string, id: ItemId | null): void {
+    const current = this.state.activeItemByWorkspace[workspaceId] ?? null
+    if (current && current !== id) this.previousActive[workspaceId] = current
     this.state.activeItemByWorkspace[workspaceId] = id
     if (id && this.state.items[id]) this.state.items[id].lastActiveAt = Date.now()
     this.changed()
   }
 
-  recordVisit(url: string, title: string): void {
-    if (!/^https?:/.test(url)) return
+  recordVisit(url: string, title: string, incognito = false): void {
+    if (incognito || !/^https?:/.test(url)) return
     const now = Date.now()
     const existing = this.history.find((h) => h.url === url)
     if (existing) {

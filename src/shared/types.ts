@@ -29,6 +29,8 @@ export interface Item {
   favicon?: string
   children?: ItemId[]
   collapsed?: boolean
+  /** Private tab: in-memory session, never saved to disk, history or archive */
+  incognito?: boolean
   createdAt: number
   lastActiveAt?: number
 }

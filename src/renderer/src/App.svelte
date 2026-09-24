@@ -4,7 +4,7 @@
   import Palette from './components/Palette.svelte'
   import Sidebar from './components/Sidebar.svelte'
 
-  let palette = $state<'new' | 'edit' | null>(null)
+  let palette = $state<'new' | 'edit' | 'incognito' | null>(null)
   let renaming = $state<string | null>(null)
   let editingWorkspace = $state<string | null>(null)
   let hideTimer: ReturnType<typeof setTimeout> | undefined
@@ -16,7 +16,7 @@
     app.snap = s
   })
   window.drift.onCommand((cmd) => {
-    if (cmd.type === 'palette') openPalette(cmd.mode as 'new' | 'edit')
+    if (cmd.type === 'palette') openPalette(cmd.mode as 'new' | 'edit' | 'incognito')
     if (cmd.type === 'rename') {
       renaming = cmd.id
       if (app.snap?.state.settings.compact) peek()
@@ -25,7 +25,7 @@
     if (cmd.type === 'peek' && app.snap?.state.settings.compact) peek()
   })
 
-  async function openPalette(mode: 'new' | 'edit'): Promise<void> {
+  async function openPalette(mode: 'new' | 'edit' | 'incognito'): Promise<void> {
     // The palette covers the window; after it the overlay starts closed again
     peekOpen = false
     await actions.palette(true)
@@ -134,10 +134,10 @@
         <div class="empty-card">
           <div class="empty-emoji">{ws.emoji ?? '✨'}</div>
           <div class="empty-title">{ws.name}</div>
-          <div class="empty-sub">Brak otwartej karty w tym workspace</div>
+          <div class="empty-sub">No open tab in this workspace</div>
           <div class="empty-actions">
-            <button onclick={() => openPalette('new')}>Nowa karta <kbd>⌘T</kbd></button>
-            {#if overlay}<button onclick={actions.toggleCompact}>Pokaż sidebar <kbd>⌘S</kbd></button>{/if}
+            <button onclick={() => openPalette('new')}>New tab <kbd>⌘T</kbd></button>
+            {#if overlay}<button onclick={actions.toggleCompact}>Show sidebar <kbd>⌘S</kbd></button>{/if}
           </div>
         </div>
       </div>

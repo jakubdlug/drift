@@ -24,8 +24,8 @@ function presentAsChrome(wc: Electron.WebContents): void {
     { brand: 'Not?A_Brand', version: '24' }
   ]
   try {
+    // No detach on 'destroyed': the debugger goes away with its webContents, and touching it then throws
     wc.debugger.attach('1.3')
-    wc.once('destroyed', () => wc.debugger.isAttached() && wc.debugger.detach())
     wc.debugger
       .sendCommand('Emulation.setUserAgentOverride', {
         userAgent: ua,
@@ -72,6 +72,7 @@ export class TabManager {
       layout: () => void
       openInNewTab: (url: string, background: boolean) => void
       htmlFullscreen: (on: boolean) => void
+      openIncognito: (url: string) => void
       onFound: (result: Electron.Result) => void
     }
   ) {
@@ -91,6 +92,26 @@ export class TabManager {
 
   get activeId(): ItemId | null {
     return this.attached
+  }
+
+  /** One in-memory session shared by all incognito tabs (like a Chrome incognito window) */
+  private incognitoSession(): Session {
+    const ses = session.fromPartition('drift-incognito')
+    if (!this.sessions.has(ses)) {
+      this.sessions.add(ses)
+      ses.setUserAgent(ses.getUserAgent().replace(/\s?Electron\/\S+/, '').replace(/\s?drift\/\S+/i, ''))
+      ses.setSpellCheckerLanguages(['pl', 'en-US'])
+    }
+    return ses
+  }
+
+  /** Wipes the incognito session once its last tab is gone */
+  private clearIncognitoIfUnused(): void {
+    const anyLeft = [...this.tabs.keys()].some((id) => this.store.state.items[id]?.incognito)
+    if (anyLeft) return
+    const ses = session.fromPartition('drift-incognito')
+    ses.clearStorageData().catch(() => {})
+    ses.clearCache().catch(() => {})
   }
 
   private sessionFor(profileId: string): Session {
@@ -130,7 +151,7 @@ export class TabManager {
   private createView(id: ItemId, url: string): WebContentsView {
     const view = new WebContentsView({
       webPreferences: {
-        session: this.sessionFor(this.store.profileOf(id)),
+        session: this.store.state.items[id]?.incognito ? this.incognitoSession() : this.sessionFor(this.store.profileOf(id)),
         sandbox: true,
         contextIsolation: true,
         scrollBounce: true
@@ -143,6 +164,7 @@ export class TabManager {
     presentAsChrome(wc)
 
     const sync = (): void => {
+      if (wc.isDestroyed()) return
       tab.info.url = wc.getURL() || tab.info.url
       tab.info.canGoBack = wc.navigationHistory.canGoBack()
       tab.info.canGoForward = wc.navigationHistory.canGoForward()
@@ -158,8 +180,9 @@ export class TabManager {
       sync()
     })
     wc.on('did-navigate', (_e, navUrl) => {
+      if (wc.isDestroyed()) return
       sync()
-      this.store.recordVisit(navUrl, wc.getTitle())
+      this.store.recordVisit(navUrl, wc.getTitle(), !!this.store.state.items[id]?.incognito)
       // Today tabs follow the page; pinned ones keep their saved URL
       if (this.store.isToday(id)) this.store.update(id, { url: navUrl })
     })
@@ -169,9 +192,10 @@ export class TabManager {
       if (isMainFrame && this.store.isToday(id)) this.store.update(id, { url: navUrl })
     })
     wc.on('page-title-updated', (_e, title) => {
+      if (wc.isDestroyed()) return
       tab.info.title = title
       tab.info.badge = BADGE_RE.test(title)
-      this.store.recordVisit(wc.getURL(), title)
+      this.store.recordVisit(wc.getURL(), title, !!this.store.state.items[id]?.incognito)
       if (this.store.isToday(id)) this.store.update(id, { title })
       this.emit()
     })
@@ -187,6 +211,7 @@ export class TabManager {
       showPageMenu(wc, params, {
         win: this.win,
         openTab: (u, background) => this.hooks.openInNewTab(u, background),
+        openIncognito: (u) => this.hooks.openIncognito(u),
         searchUrl: this.store.state.settings.searchUrl
       })
     )
@@ -202,11 +227,11 @@ export class TabManager {
       }
       const choice = dialog.showMessageBoxSync(this.win, {
         type: 'question',
-        buttons: ['Zostań', 'Opuść stronę'],
+        buttons: ['Stay', 'Leave page'],
         defaultId: 0,
         cancelId: 0,
-        message: 'Opuścić tę stronę?',
-        detail: 'Wprowadzone zmiany mogą nie zostać zapisane.'
+        message: 'Leave this page?',
+        detail: 'Changes you made may not be saved.'
       })
       if (choice === 1) e.preventDefault()
     })
@@ -302,8 +327,10 @@ export class TabManager {
     const tab = this.tabs.get(id)
     if (!tab) return
     if (this.attached === id) this.detach()
+    const wasIncognito = !!this.store.state.items[id]?.incognito
     if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close()
     this.tabs.delete(id)
+    if (wasIncognito) this.clearIncognitoIfUnused()
     this.emit()
   }
 

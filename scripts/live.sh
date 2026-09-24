@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")/.."
 if pgrep -x Drift >/dev/null; then
-  echo "Zamykam Drift.app (dane są wspólne)…"
+  echo "Closing Drift.app (data is shared)…"
   osascript -e 'quit app "Drift"'
   while pgrep -x Drift >/dev/null; do sleep 0.5; done
 fi

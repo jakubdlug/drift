@@ -60,7 +60,7 @@
     {/if}
   {/each}
   {#if !ids.length}
-    <div class="hint">Przeciągnij tu kartę, aby dodać ją do Essentials</div>
+    <div class="hint">Drag a tab here to add it to Essentials</div>
   {/if}
 </div>
 

@@ -76,7 +76,7 @@ export function capturePageErrors(wc: WebContents): void {
   })
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
     // -3 = aborted (redirects, user navigating away)
-    if (code !== -3 && isMain) pushLog('error', `[page] nie załadowano ${hostOf(url)}: ${desc} (${code})`)
+    if (code !== -3 && isMain) pushLog('error', `[page] failed to load ${hostOf(url)}: ${desc} (${code})`)
   })
   wc.on('render-process-gone', (_e, d) => pushLog('error', `[page ${hostOf(wc.getURL())}] crashed: ${d.reason}`))
 }
@@ -145,7 +145,7 @@ const locateJs = (sel: { selector?: string; text?: string }): string => `(() => 
 })()`
 
 const DESCRIBE_FN = `function describe(e) {
-  if (!e) return 'nic';
+  if (!e) return 'nothing';
   const label = (e.getAttribute('aria-label') || e.title || e.innerText || e.value || '').replace(/\\s+/g, ' ').trim().slice(0, 50);
   const cls = typeof e.className === 'string' ? e.className.split(' ').filter((c) => c && !c.startsWith('svelte-') && !c.startsWith('s-')).slice(0, 2).join('.') : '';
   return e.tagName.toLowerCase() + (cls ? '.' + cls : '') + (label ? ' "' + label + '"' : '');
@@ -200,7 +200,7 @@ const SECRET_TTL = 30 * 60_000
 const secretCache = new Map<string, { value: string; at: number }>()
 
 async function readSecret(ref: string): Promise<string> {
-  if (!/^op:\/\//.test(ref)) throw new Error('--secret przyjmuje tylko odnośnik op://vault/item/pole (1Password)')
+  if (!/^op:\/\//.test(ref)) throw new Error('--secret only accepts an op://vault/item/field reference (1Password)')
   const cached = secretCache.get(ref)
   // One-time codes change every 30 s: never cache them
   const isOtp = /attribute=otp/i.test(ref)
@@ -211,7 +211,7 @@ async function readSecret(ref: string): Promise<string> {
     return stdout
   } catch (e) {
     const msg = String((e as { stderr?: string }).stderr || (e as Error).message).split('\n')[0]
-    throw new Error(`1Password: nie udało się odczytać ${ref}: ${msg}`)
+    throw new Error(`1Password: failed to read ${ref}: ${msg}`)
   }
 }
 
@@ -225,8 +225,8 @@ const secretFields = new WeakMap<WebContents, Set<number>>()
  *   12                 → ref from the latest tree
  *   css:.tile          → CSS selector
  *   text:Clear         → element by visible text (DOM)
- *   button Wyślij      → role + accessible name (role must be a known ARIA role)
- *   Wyślij             → accessible name, any role
+ *   button Send        → role + accessible name (role must be a known ARIA role)
+ *   Send               → accessible name, any role
  */
 /** Fuzzy matches used during the current command, reported back to the caller */
 let fuzzyNotes: string[] = []
@@ -262,7 +262,7 @@ async function resolve(wc: WebContents, raw: string, requireVisible = true): Pro
   if (s.ref) return { kind: 'node', backendNodeId: refNode(wc, s.ref) }
   if (s.css || s.text) {
     const found = (await wc.executeJavaScript(locateJs({ selector: s.css, text: s.text }))) as { x: number; y: number } | null
-    if (!found) throw new Error(`Nie znaleziono: ${raw}`)
+    if (!found) throw new Error(`Not found: ${raw}`)
     return { kind: 'dom', ...found }
   }
   let id = await axFind(wc, { role: s.role, name: s.name! }, requireVisible)
@@ -271,12 +271,12 @@ async function resolve(wc: WebContents, raw: string, requireVisible = true): Pro
     if (near.length === 1) {
       const m = near[0].match(/^(\w+) "(.*)"$/)
       if (m) id = await axFind(wc, { role: m[1], name: m[2] }, requireVisible)
-      if (id) fuzzyNotes.push(`~ "${s.name}" dopasowano do ${near[0]}`)
+      if (id) fuzzyNotes.push(`~ "${s.name}" matched to ${near[0]}`)
     }
   }
   if (!id) {
     const hint = await axCandidates(wc, s.role, s.name).catch(() => [])
-    throw new Error(`Nie znaleziono${requireVisible ? ' widocznego' : ''} elementu: ${raw}${hint.length ? `\n   dostępne ${s.role ?? 'interaktywne'}: ${hint.join(', ')}` : ''}`)
+    throw new Error(`No${requireVisible ? ' visible' : ''} element found: ${raw}${hint.length ? `\n   available ${s.role ?? 'interactive'}: ${hint.join(', ')}` : ''}`)
   }
   return { kind: 'node', backendNodeId: id }
 }
@@ -350,7 +350,7 @@ async function scoped(wc: WebContents, raw: string, scope: Scope): Promise<numbe
 
   if (scope.within) {
     const containers = await nodeList(wc, scope.within)
-    if (!containers.length) throw new Error(`--within: nie znaleziono ${scope.within}`)
+    if (!containers.length) throw new Error(`--within: not found ${scope.within}`)
     const [container] = await objects([containers[0]])
     const tObjs = await objects(targets)
     const { result } = await cdp<{ result: { value: boolean[] } }>(wc, 'Runtime.callFunctionOn', {
@@ -364,7 +364,7 @@ async function scoped(wc: WebContents, raw: string, scope: Scope): Promise<numbe
 
   if (scope.near) {
     const anchors = await nodeList(wc, scope.near)
-    if (!anchors.length) throw new Error(`--near: nie znaleziono ${scope.near}`)
+    if (!anchors.length) throw new Error(`--near: not found ${scope.near}`)
     const aObjs = await objects(anchors)
     const tObjs = await objects(targets)
     const { result } = await cdp<{ result: { value: number[] } }>(wc, 'Runtime.callFunctionOn', {
@@ -389,7 +389,7 @@ async function scoped(wc: WebContents, raw: string, scope: Scope): Promise<numbe
   if (!targets.length) return []
   if (scope.nth) {
     const one = targets[scope.nth - 1]
-    if (!one) throw new Error(`--nth ${scope.nth}: jest tylko ${targets.length} dopasowań`)
+    if (!one) throw new Error(`--nth ${scope.nth}: there are only ${targets.length} matches`)
     return [one]
   }
   return scope.all ? targets : targets.slice(0, 1)
@@ -417,11 +417,11 @@ async function editablePoint(wc: WebContents, raw: string, node?: number): Promi
     objectId = (await cdp<{ object: { objectId: string } }>(wc, 'DOM.resolveNode', { backendNodeId: r.backendNodeId })).object.objectId
   } else {
     const { result } = await cdp<{ result: { objectId?: string } }>(wc, 'Runtime.evaluate', { expression: `document.querySelector('[data-drift-target]')` })
-    if (!result.objectId) throw new Error(`Nie znaleziono: ${raw}`)
+    if (!result.objectId) throw new Error(`Not found: ${raw}`)
     objectId = result.objectId
   }
   const { result } = await cdp<{ result: { objectId?: string; subtype?: string } }>(wc, 'Runtime.callFunctionOn', { objectId, functionDeclaration: FIND_EDITABLE_FN })
-  if (!result.objectId || result.subtype === 'null') throw new Error(`${raw} nie jest polem tekstowym i nie zawiera żadnego`)
+  if (!result.objectId || result.subtype === 'null') throw new Error(`${raw} is not a text field and does not contain one`)
   const { node: desc } = await cdp<{ node: { backendNodeId: number } }>(wc, 'DOM.describeNode', { objectId: result.objectId })
   const p = await nodePoint(wc, desc.backendNodeId)
   const x = Math.round(p.x)
@@ -440,20 +440,20 @@ async function fillFocused(wc: WebContents, objectId: string, value: string, sec
     const active = () => root.activeElement || document.activeElement;
     if (active() !== this && !this.contains(active())) this.focus();
     const e = active();
-    if (e !== this && !this.contains(e)) return { ok: false, active: e ? e.tagName.toLowerCase() : 'nic' };
+    if (e !== this && !this.contains(e)) return { ok: false, active: e ? e.tagName.toLowerCase() : 'nothing' };
     if (typeof this.select === 'function') this.select();
     else if (this.isContentEditable) { const s = (root.getSelection ? root : document).getSelection(); s.selectAllChildren(this) }
-    else return { ok: false, active: this.tagName.toLowerCase() + ' (nieedytowalny po kliknięciu)' };
+    else return { ok: false, active: this.tagName.toLowerCase() + ' (not editable after click)' };
     return { ok: true };
   }`)
-  if (!focus.ok) throw new Error(`Po kliknięciu fokus jest na ${focus.active}, nie na polu — nic nie wpisano`)
+  if (!focus.ok) throw new Error(`After the click, focus is on ${focus.active}, not on the field — nothing was typed`)
   wc.insertText(value)
   await sleep(50)
   const now = String(await call<string>(`function () { return this.value ?? this.innerText ?? '' }`))
   // Password fields hide their value; for secrets never echo anything back
-  if (secret) return now.length >= value.length ? `wpisano •••••• (${value.length} znaków z 1Password)` : 'wpisano •••••• (nie udało się potwierdzić długości)'
-  if (!now.includes(value.slice(0, 20))) throw new Error(`Pole zawiera ${JSON.stringify(now.slice(0, 60))} zamiast wpisanego tekstu`)
-  return `wpisano ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
+  if (secret) return now.length >= value.length ? `typed •••••• (${value.length} characters from 1Password)` : 'typed •••••• (could not confirm length)'
+  if (!now.includes(value.slice(0, 20))) throw new Error(`The field contains ${JSON.stringify(now.slice(0, 60))} instead of the typed text`)
+  return `typed ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
 }
 
 // ---------- status, diff, wait ----------
@@ -499,7 +499,7 @@ function parseCondition(raw: string): Condition {
   // Bare keys: "idle" (page settled) — optionally idle=<ms of quiet>
   if (/^idle$/.test(raw.trim())) return { key: 'idle', op: '=', value: '500' }
   const m = raw.match(/^([\w.]+)\s*(!=|!~|=|~)\s*(.*)$/)
-  if (!m) throw new Error(`Zły warunek "${raw}" — użyj klucz=wartość, klucz!=wartość, klucz~fragment albo klucz!~fragment`)
+  if (!m) throw new Error(`Bad condition "${raw}" — use key=value, key!=value, key~fragment or key!~fragment`)
   return { key: m[1], op: m[2] as Condition['op'], value: m[3] }
 }
 
@@ -606,7 +606,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
   const targetName = ((p.target as Target) ?? 'sidebar') as Target
   const wc = (): WebContents => {
     const t = ctx.target(targetName)
-    if (!t) throw new Error(`Brak widoku: ${targetName}`)
+    if (!t) throw new Error(`No such view: ${targetName}`)
     return t
   }
 
@@ -617,19 +617,19 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       return ctx.status()
     case 'action': {
       const fn = ctx.actions[p.name as string]
-      if (!fn) throw new Error(`Nieznana akcja. Dostępne: ${Object.keys(ctx.actions).join(', ')}`)
+      if (!fn) throw new Error(`Unknown action. Available: ${Object.keys(ctx.actions).join(', ')}`)
       return (await fn(...((p.args as unknown[]) ?? []))) ?? 'ok'
     }
     case 'menu': {
       const item = findMenuItem(Menu.getApplicationMenu()?.items ?? [], p.label as string)
-      if (!item) throw new Error(`Brak pozycji menu: ${p.label}`)
+      if (!item) throw new Error(`No such menu item: ${p.label}`)
       item.click()
       return 'ok'
     }
     case 'tree': {
       const target = wc()
       const root = p.within ? await resolve(target, p.within as string, false) : null
-      if (root && root.kind !== 'node') throw new Error('--within dla tree wymaga selektora roli/nazwy albo ref')
+      if (root && root.kind !== 'node') throw new Error('--within for tree requires a role/name selector or a ref')
       return await axTree(target, {
         mask: secretFields.get(target),
         all: !!p.all || !!root,
@@ -646,23 +646,23 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       const rawGroups = (p.conditions as unknown[]) ?? []
       const groups = (rawGroups.length && Array.isArray(rawGroups[0]) ? (rawGroups as string[][]) : [rawGroups as string[]]).map((g) => g.map(parseCondition))
       const failConds = ((p.fail as string[]) ?? []).map(parseCondition)
-      if (!groups.flat().length) throw new Error('Podaj warunki, np. mode=edge url~/watch el=button Wyślij idle')
+      if (!groups.flat().length) throw new Error('Provide conditions, e.g. mode=edge url~/watch el=button Send idle')
       const timeout = Number(p.timeout ?? 5000)
       const start = Date.now()
       const label = (c: Condition): string => (c.key === 'idle' ? 'idle' : `${c.key}${c.op}${c.value}`)
       let last: boolean[][] = []
       while (true) {
         for (const f of failConds) {
-          if (await checkCondition(ctx, f, targetName)) throw new Error(`spełniony warunek porażki ${label(f)} po ${Date.now() - start} ms`)
+          if (await checkCondition(ctx, f, targetName)) throw new Error(`failure condition met ${label(f)} after ${Date.now() - start} ms`)
         }
         last = await Promise.all(groups.map((g) => Promise.all(g.map((c) => checkCondition(ctx, c, targetName)))))
         const hit = last.findIndex((r) => r.every(Boolean))
-        if (hit >= 0) return `spełnione po ${Date.now() - start} ms${groups.length > 1 ? ` (gałąź ${hit + 1}: ${groups[hit].map(label).join(' ')})` : ''}`
+        if (hit >= 0) return `met after ${Date.now() - start} ms${groups.length > 1 ? ` (branch ${hit + 1}: ${groups[hit].map(label).join(' ')})` : ''}`
         if (Date.now() - start > timeout) break
         await sleep(50)
       }
       const failed = groups.flatMap((g, gi) => g.filter((_, i) => !last[gi]?.[i]))
-      const desc = failed.map((c) => `${label(c)}${['el', 'text', 'selector', 'idle', 'heading'].includes(c.key) ? '' : ` (jest: ${fmt(ctx.status()[c.key])})`}`)
+      const desc = failed.map((c) => `${label(c)}${['el', 'text', 'selector', 'idle', 'heading'].includes(c.key) ? '' : ` (is: ${fmt(ctx.status()[c.key])})`}`)
       // For a missing element, show what similar elements do exist (saves a lookup roundtrip)
       const hints: string[] = []
       for (const c of failed.filter((f) => f.key === 'el' && !f.op.startsWith('!'))) {
@@ -670,7 +670,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         const q = parseSelector(c.value)
         if (t && q.name !== undefined) hints.push(...(await axCandidates(t, q.role, q.name).catch(() => [])))
       }
-      throw new Error(`timeout ${timeout} ms, niespełnione: ${desc.join(', ')}${hints.length ? `\n   podobne: ${hints.join(', ')}` : ''}`)
+      throw new Error(`timeout ${timeout} ms, not met: ${desc.join(', ')}${hints.length ? `\n   similar: ${hints.join(', ')}` : ''}`)
     }
     case 'click':
     case 'hover':
@@ -685,7 +685,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         if (!found.length) {
           const q = parseSelector(raw)
           const hint = q.name !== undefined ? await axCandidates(target, q.role, q.name).catch(() => []) : []
-          throw new Error(`Nie znaleziono ${raw} w zawężeniu${hint.length ? `\n   podobne na stronie: ${hint.join(', ')}` : ''}`)
+          throw new Error(`Not found ${raw} within the scope${hint.length ? `\n   similar on the page: ${hint.join(', ')}` : ''}`)
         }
         nodes = found
       }
@@ -706,12 +706,12 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
           pt = await locate()
         }
         // Menus and popovers often animate in: give an occluded target a moment to settle
-        for (let i = 0; i < 6 && pt.hit && !pt.hit.ok && pt.hit.hit !== 'nic'; i++) {
+        for (let i = 0; i < 6 && pt.hit && !pt.hit.ok && pt.hit.hit !== 'nothing'; i++) {
           await sleep(120)
           pt = await locate()
         }
         // Hover-revealed controls (Keep, Gmail rows): move the mouse over first, then re-check
-        if (pt.hit && !pt.hit.ok && pt.hit.hit !== 'nic') {
+        if (pt.hit && !pt.hit.ok && pt.hit.hit !== 'nothing') {
           target.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y })
           await sleep(150)
           pt = await locate()
@@ -719,17 +719,17 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         extra.hit = pt.hit
         const { x, y } = pt
         if (extra.hit && !extra.hit.ok && !p.force) {
-          const offscreen = extra.hit.hit === 'nic'
+          const offscreen = extra.hit.hit === 'nothing'
           throw new Error(
-            (done.length ? `(${done.length} z ${nodes.length} wykonane) ` : '') +
+            (done.length ? `(${done.length} of ${nodes.length} done) ` : '') +
               (offscreen
-                ? `Cel ${extra.hit.target} jest poza widokiem (@${x},${y}) — nie klikam (--force wymusza)`
-                : `Cel ${extra.hit.target} jest zasłonięty przez ${extra.hit.hit} — nie klikam (--force wymusza)`)
+                ? `Target ${extra.hit.target} is off-screen (@${x},${y}) — not clicking (--force overrides)`
+                : `Target ${extra.hit.target} is covered by ${extra.hit.hit} — not clicking (--force overrides)`)
           )
         }
         target.sendInputEvent({ type: 'mouseMove', x, y })
         if (method === 'hover') {
-          done.push(`mysz @${x},${y}`)
+          done.push(`mouse @${x},${y}`)
           continue
         }
         const button = (p.button as 'left' | 'right' | 'middle') ?? 'left'
@@ -740,7 +740,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
           target.sendInputEvent({ ...base, type: 'mouseDown', clickCount: 2 })
           target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 2 })
         }
-        if (method === 'click') done.push(`klik @${x},${y}`)
+        if (method === 'click') done.push(`click @${x},${y}`)
         else {
           const value = p.secretRef ? await readSecret(String(p.secretRef)) : String(p.value ?? '')
           done.push(await fillFocused(target, editable!, value, !!p.secretRef))
@@ -757,7 +757,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       const target = wc()
       // Containers (regions, dialogs) often have no box of their own: skip the visibility check
       const r = await resolve(target, p.sel as string, false)
-      if (r.kind !== 'node') throw new Error('snapshot wymaga selektora roli/nazwy albo ref')
+      if (r.kind !== 'node') throw new Error('snapshot requires a role/name selector or a ref')
       return await axTree(target, { all: true, rootBackendId: r.backendNodeId, filter: p.filter as string | undefined, mask: secretFields.get(target) })
     }
     case 'goto': {
@@ -782,16 +782,16 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
           const until = Date.now() + Number(p.timeout ?? 8000)
           while (Date.now() < until && !matches()) {
             if (ctx.unloadBlockedSince(started))
-              throw new Error('Strona blokuje opuszczenie (beforeunload — niezapisane zmiany?). Dokończ/zapisz, użyj --new albo --force')
+              throw new Error('The page is blocking navigation away (beforeunload — unsaved changes?). Finish/save, use --new or --force')
             await sleep(50)
           }
           await sleep(400)
-          if (matches()) return attempt > 1 ? 'ok (za drugim razem — strona przekierowała)' : 'ok'
+          if (matches()) return attempt > 1 ? 'ok (on the second try — the page redirected)' : 'ok'
         }
       } finally {
         ctx.guardUnload(false)
       }
-      throw new Error(`Nie udało się otworzyć ${want} — jest ${ctx.status().url}`)
+      throw new Error(`Failed to open ${want} — current url is ${ctx.status().url}`)
     }
     case 'cdp': {
       // Raw DevTools Protocol for diagnostics (network, console, emulation) without code changes
@@ -804,7 +804,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       const re = new RegExp(m ? m[1] : String(p.pattern), (m?.[2] ?? '').replace('g', '') + 'g')
       const found = [...new Set([...text.matchAll(re)].map((x) => x[1] ?? x[0]))]
       const limited = p.limit ? found.slice(0, Number(p.limit)) : found
-      if (!limited.length) throw new Error(`Brak dopasowań ${re}`)
+      if (!limited.length) throw new Error(`No matches for ${re}`)
       return limited
     }
     case 'open': {
@@ -855,17 +855,17 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
 function substitute(value: unknown, vars: Record<string, unknown>): unknown {
   if (typeof value === 'string')
     return value.replace(/\$\{(\w+)(?:\[(\d+)\])?((?:\|\w+(?::[^|}]*)?)*)\}/g, (all, name, index, filters) => {
-      if (!(name in vars)) throw new Error(`Nieznana zmienna \${${name}} — zdefiniuj ją wcześniej przez --as`)
+      if (!(name in vars)) throw new Error(`Unknown variable \${${name}} — define it earlier with --as`)
       let v: unknown = vars[name]
       if (index !== undefined) v = Array.isArray(v) ? v[Number(index)] : undefined
-      if (v === undefined) throw new Error(`\${${name}[${index}]} poza zakresem`)
+      if (v === undefined) throw new Error(`\${${name}[${index}]} out of range`)
       let str = Array.isArray(v) ? null : String(v)
       for (const f of String(filters).split('|').filter(Boolean)) {
         const [fname, arg] = f.split(':')
         if (fname === 'lines') str = Array.isArray(v) ? v.join('\n') : str
         else if (fname === 'join') str = Array.isArray(v) ? v.join(arg ?? ', ') : str
         else if (fname === 'url') str = encodeURIComponent(str ?? (Array.isArray(v) ? v.join(', ') : ''))
-        else throw new Error(`Nieznany filtr |${fname} (dostępne: lines, join:X, url)`)
+        else throw new Error(`Unknown filter |${fname} (available: lines, join:X, url)`)
       }
       return str ?? (Array.isArray(v) ? v.join(', ') : String(v))
     })
@@ -954,6 +954,6 @@ export function startControl(ctx: ControlContext): void {
   server.listen(0, '127.0.0.1', () => {
     const { port } = server.address() as AddressInfo
     writeFileSync(join(app.getPath('userData'), 'control.json'), JSON.stringify({ port, token, pid: process.pid, instance: INSTANCE }), { mode: 0o600 })
-    console.log(`Kanał sterowania: 127.0.0.1:${port} (instancja ${INSTANCE})`)
+    console.log(`Control channel: 127.0.0.1:${port} (instance ${INSTANCE})`)
   })
 }

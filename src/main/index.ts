@@ -11,6 +11,9 @@ import { TabManager } from './tabs'
 const GAP = 8
 const PEEK_SHADOW = 16
 
+// Stack traces point at src/… instead of line numbers in the bundle
+process.setSourceMapsEnabled(true)
+
 app.setName('Drift')
 nativeTheme.themeSource = 'dark'
 
@@ -29,9 +32,17 @@ async function acquireInstanceLock(): Promise<boolean> {
 
 // Watchers and scripts stop us with SIGTERM; quit properly so state gets flushed
 process.on('SIGTERM', () => app.quit())
+// Same for synchronous throws in event handlers: log instead of Electron's modal error dialog
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err)
+  try {
+    layout()
+    push()
+  } catch {}
+})
 // A failing handler must not leave the window half-updated: log, then re-sync the UI
 process.on('unhandledRejection', (err) => {
-  console.error('Nieobsłużony błąd:', err)
+  console.error('Unhandled rejection:', err)
   try {
     layout()
     push()
@@ -123,7 +134,9 @@ function openFind(): void {
   findView.setBackgroundColor('#00000000')
   captureConsole(findView.webContents, 'find')
   loadRenderer(findView, 'find')
-  findView.webContents.once('did-finish-load', () => findView?.webContents.focus())
+  findView.webContents.once('did-finish-load', () => {
+    if (findView && !findView.webContents.isDestroyed()) findView.webContents.focus()
+  })
   layout()
 }
 
@@ -171,7 +184,7 @@ function push(): void {
 
 function normaliseInput(input: string): string {
   const text = input.trim()
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || /^(about|data|file|chrome):/i.test(text)) return text
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || /^(about|data|file|chrome|view-source):/i.test(text)) return text
   if (/^localhost(:\d+)?(\/|$)/.test(text) || /^\d{1,3}(\.\d{1,3}){3}(:\d+)?(\/|$)/.test(text)) return `http://${text}`
   if (!/\s/.test(text) && /^[^/]+\.[a-z]{2,}(:\d+)?(\/.*)?$/i.test(text)) return `https://${text}`
   return store.state.settings.searchUrl.replace('%s', encodeURIComponent(text))
@@ -189,9 +202,9 @@ function openItem(id: ItemId): void {
   tabs.show(id)
 }
 
-function newTab(input: string, workspace: Workspace = store.activeWorkspace, focus = true): ItemId {
+function newTab(input: string, workspace: Workspace = store.activeWorkspace, focus = true, incognito = false): ItemId {
   const url = normaliseInput(input)
-  const item = store.createTab(url, url, workspace)
+  const item = store.createTab(url, url, workspace, incognito)
   if (focus) openItem(item.id)
   return item.id
 }
@@ -201,9 +214,14 @@ function closeItem(id: ItemId): void {
   const ws = store.activeWorkspace
   const wasActive = store.state.activeItemByWorkspace[ws.id] === id
   let next: ItemId | null = null
-  if (wasActive && store.isToday(id)) {
-    const i = ws.today.indexOf(id)
-    next = ws.today[i + 1] ?? ws.today[i - 1] ?? null
+  if (wasActive) {
+    // Like Chrome/Arc: go back to the tab used before this one, else a neighbour in Today
+    const prev = store.previousActive[ws.id]
+    if (prev && prev !== id && store.state.items[prev]) next = prev
+    else if (store.isToday(id)) {
+      const i = ws.today.indexOf(id)
+      next = ws.today[i + 1] ?? ws.today[i - 1] ?? null
+    }
   }
   tabs.close(id)
   if (store.isToday(id)) store.archive(id)
@@ -235,6 +253,39 @@ function cycleWorkspace(delta: number): void {
   const list = store.state.workspaces
   const i = list.findIndex((w) => w.id === store.state.activeWorkspaceId)
   switchWorkspace(list[(i + delta + list.length) % list.length].id)
+}
+
+/** Sidebar order used by ⌘1…9 and next/previous tab: Essentials, pinned (expanded folders), Today */
+function tabOrder(): ItemId[] {
+  const s = store.state
+  const ws = store.activeWorkspace
+  const flatten = (ids: ItemId[]): ItemId[] =>
+    ids.flatMap((id) => {
+      const it = s.items[id]
+      if (!it) return []
+      if (it.kind === 'folder') return it.collapsed ? [] : flatten(it.children ?? [])
+      return [id]
+    })
+  return [...flatten(s.essentials[ws.profileId] ?? []), ...flatten(ws.pinned), ...ws.today.filter((id) => s.items[id])]
+}
+
+function selectTabAt(index: number): void {
+  const order = tabOrder()
+  const id = index < 0 ? order[order.length - 1] : order[index]
+  if (id) openItem(id)
+}
+
+function cycleTab(delta: number): void {
+  const order = tabOrder()
+  if (!order.length) return
+  const i = order.indexOf(activeItemId() ?? '')
+  openItem(order[(i + delta + order.length) % order.length])
+}
+
+function duplicateTab(): void {
+  const id = activeItemId()
+  const url = id ? (tabs.runtime()[id]?.url ?? store.state.items[id]?.url) : undefined
+  if (url) newTab(url, store.activeWorkspace, true, !!store.state.items[id!]?.incognito)
 }
 
 function togglePin(id: ItemId): void {
@@ -302,31 +353,31 @@ function itemMenu(id: ItemId): void {
   const isTab = item.kind === 'tab'
   const loaded = tabs.isLoaded(id)
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: 'Zmień nazwę', click: () => chrome.webContents.send('command', { type: 'rename', id }) },
+    { label: 'Rename', click: () => chrome.webContents.send('command', { type: 'rename', id }) },
     ...(isTab
       ? [
-          { label: 'Kopiuj link', click: () => clipboard.writeText(tabs.runtime()[id]?.url ?? item.url ?? '') },
+          { label: 'Copy link', click: () => clipboard.writeText(tabs.runtime()[id]?.url ?? item.url ?? '') },
           ...(loc?.zone !== 'today'
             ? [
-                { label: 'Wróć do zapisanego URL', click: () => item.url && tabs.navigate(id, item.url) },
+                { label: 'Go back to saved URL', click: () => item.url && tabs.navigate(id, item.url) },
                 {
-                  label: 'Zapisz bieżący URL jako domyślny',
+                  label: 'Save current URL as default',
                   click: () => store.update(id, { url: tabs.runtime()[id]?.url ?? item.url })
                 }
               ]
             : []),
           { type: 'separator' as const },
           loc?.zone === 'today'
-            ? { label: 'Przypnij', click: () => togglePin(id) }
-            : { label: 'Odepnij do Today', click: () => togglePin(id) },
+            ? { label: 'Pin', click: () => togglePin(id) }
+            : { label: 'Unpin to Today', click: () => togglePin(id) },
           ...(loc?.zone !== 'essentials'
-            ? [{ label: 'Dodaj do Essentials', click: () => store.move(id, { zone: 'essentials', index: 999 }) }]
+            ? [{ label: 'Add to Essentials', click: () => store.move(id, { zone: 'essentials', index: 999 }) }]
             : []),
-          ...(loaded ? [{ label: 'Uśpij kartę', click: () => tabs.sleep(id) }] : [])
+          ...(loaded ? [{ label: 'Sleep tab', click: () => tabs.sleep(id) }] : [])
         ]
-      : [{ label: 'Nowy podfolder', click: () => store.createFolder('Nowy folder', { zone: 'folder', parentId: id, index: 0 }) }]),
+      : [{ label: 'New subfolder', click: () => store.createFolder('New folder', { zone: 'folder', parentId: id, index: 0 }) }]),
     {
-      label: 'Przenieś do workspace',
+      label: 'Move to workspace',
       submenu: store.state.workspaces
         .filter((w) => w.id !== store.activeWorkspace.id && loc?.zone !== 'essentials')
         .map((w) => ({
@@ -341,7 +392,7 @@ function itemMenu(id: ItemId): void {
     },
     { type: 'separator' },
     {
-      label: item.kind === 'folder' ? 'Usuń folder z zawartością' : 'Usuń',
+      label: item.kind === 'folder' ? 'Delete folder and its contents' : 'Delete',
       click: () => {
         for (const removed of store.remove(id)) tabs.close(removed)
         push()
@@ -356,9 +407,9 @@ function workspaceMenu(id: string): void {
   if (!ws) return
   const profiles = store.state.profiles
   Menu.buildFromTemplate([
-    { label: 'Zmień nazwę / emoji', click: () => chrome.webContents.send('command', { type: 'edit-workspace', id }) },
+    { label: 'Rename / emoji', click: () => chrome.webContents.send('command', { type: 'edit-workspace', id }) },
     {
-      label: 'Profil (sesja)',
+      label: 'Profile (session)',
       submenu: profiles.map((p) => ({
         label: p.name,
         type: 'radio' as const,
@@ -371,13 +422,13 @@ function workspaceMenu(id: string): void {
     },
     { type: 'separator' },
     {
-      label: 'Usuń workspace',
+      label: 'Delete workspace',
       enabled: store.state.workspaces.length > 1,
       click: async () => {
         const { response } = await dialog.showMessageBox(win, {
           type: 'warning',
-          message: `Usunąć workspace „${ws.name}” razem z przypiętymi kartami?`,
-          buttons: ['Anuluj', 'Usuń'],
+          message: `Delete workspace “${ws.name}” along with its pinned tabs?`,
+          buttons: ['Cancel', 'Delete'],
           defaultId: 0
         })
         if (response === 1) deleteWorkspace(ws.id)
@@ -397,7 +448,7 @@ function deleteWorkspace(id: string): void {
     try {
       switchWorkspace(fallback.id)
     } catch (err) {
-      console.error('Przełączenie workspace nie powiodło się:', err)
+      console.error('Switching workspace failed:', err)
       store.state.activeWorkspaceId = fallback.id
     }
   }
@@ -412,7 +463,7 @@ function newWorkspace(): void {
   const current = store.activeWorkspace
   const ws: Workspace = {
     id: crypto.randomUUID(),
-    name: 'Nowy workspace',
+    name: 'New workspace',
     emoji: '✨',
     color: current.color,
     profileId: current.profileId,
@@ -462,7 +513,7 @@ function registerIpc(): void {
   }
   on('snapshot', () => ({ state: store.state, tabs: tabs.runtime(), mode, hasPage: !!tabs.activeView }) satisfies Snapshot)
   on('open-item', (id: ItemId) => openItem(id))
-  on('new-tab', (input: string) => newTab(input))
+  on('new-tab', (input: string, opts?: { incognito?: boolean }) => newTab(input, store.activeWorkspace, true, !!opts?.incognito))
   on('navigate', (input: string, force = false) => {
     const id = activeItemId()
     if (id) tabs.navigate(id, normaliseInput(input), force)
@@ -536,7 +587,7 @@ function animateReveal(to: number, done?: () => void): void {
  */
 function openByName(query: string): string {
   const q = query.toLowerCase().trim()
-  if (!q) throw new Error('Podaj nazwę karty')
+  if (!q) throw new Error('Provide a tab name')
   const s = store.state
   const flatten = (ids: ItemId[]): ItemId[] =>
     ids.flatMap((id) => (s.items[id]?.kind === 'folder' ? flatten(s.items[id].children ?? []) : [id]))
@@ -554,10 +605,10 @@ function openByName(query: string): string {
     if (best) {
       if (ws.id !== store.activeWorkspace.id) switchWorkspace(ws.id)
       openItem(best.id)
-      return `otwarto "${s.items[best.id].title}"${ws.id !== ordered[0].id ? ` w workspace ${ws.name}` : ''}`
+      return `opened "${s.items[best.id].title}"${ws.id !== ordered[0].id ? ` in workspace ${ws.name}` : ''}`
     }
   }
-  throw new Error(`Brak karty pasującej do "${query}"`)
+  throw new Error(`No tab matching "${query}"`)
 }
 
 function toggleCompact(): void {
@@ -609,6 +660,7 @@ function createWindow(): void {
     onChange: push,
     layout,
     openInNewTab: (url, background) => newTab(url, store.activeWorkspace, !background),
+    openIncognito: (url) => newTab(url, store.activeWorkspace, true, true),
     htmlFullscreen: (on) => {
       htmlFullscreen = on
       if (on && !win.isFullScreen()) {
@@ -683,6 +735,16 @@ function createWindow(): void {
         app.setAsDefaultProtocolClient('https')
       },
       newFolder: () => store.createFolder(),
+      newIncognito: () => chrome.webContents.send('command', { type: 'palette', mode: 'incognito' }),
+      tabAt: selectTabAt,
+      cycleTab,
+      duplicateTab,
+      stop: () => tabs.webContents()?.stop(),
+      print: () => tabs.webContents()?.print(),
+      viewSource: () => {
+        const url = tabs.webContents()?.getURL()
+        if (url && /^https?:/.test(url)) newTab(`view-source:${url}`)
+      },
       newWorkspace
     })
   )
@@ -719,7 +781,7 @@ function controlSummary(): unknown {
     if (!it) return []
     const pad = '  '.repeat(depth)
     if (it.kind === 'folder')
-      return [`${pad}📁 ${it.title} [${id}]${it.collapsed ? ' (zwinięty)' : ''}`, ...(it.children ?? []).flatMap((c) => line(c, depth + 1))]
+      return [`${pad}📁 ${it.title} [${id}]${it.collapsed ? ' (collapsed)' : ''}`, ...(it.children ?? []).flatMap((c) => line(c, depth + 1))]
     const live = rt[id] ? (rt[id].sleeping ? ' 💤' : ' ●') : ''
     return [`${pad}${it.title} — ${it.url} [${id}]${live}`]
   }
@@ -727,7 +789,7 @@ function controlSummary(): unknown {
   return {
     mode,
     compact: s.settings.compact,
-    workspace: `${ws.emoji ?? ''} ${ws.name} [${ws.id}] profil=${ws.profileId}`,
+    workspace: `${ws.emoji ?? ''} ${ws.name} [${ws.id}] profile=${ws.profileId}`,
     workspaces: s.workspaces.map((w) => `${w.emoji ?? ''} ${w.name} [${w.id}]`),
     activeTab: active ? { id: active, title: rt[active]?.title ?? s.items[active]?.title, url: rt[active]?.url } : null,
     findOpen: !!findView,
@@ -742,25 +804,25 @@ function controlSummary(): unknown {
 
 async function runArcImport(): Promise<void> {
   const log = (m: string): void => console.log(m)
-  log('Import z Arca…')
+  log('Importing from Arc…')
   const { state, profiles } = importSidebar()
   // Arc's own timestamps would archive every Today tab at once
   for (const ws of state.workspaces) for (const id of ws.today) state.items[id].lastActiveAt = Date.now()
-  log(`  • ${state.workspaces.length} workspace'ów, ${Object.keys(state.items).length} elementów, ${profiles.length} profili`)
+  log(`  • ${state.workspaces.length} workspaces, ${Object.keys(state.items).length} items, ${profiles.length} profiles`)
   copyStorage(profiles, log)
   const history = importHistory(profiles)
-  log(`  • historia: ${history.length} adresów`)
+  log(`  • history: ${history.length} addresses`)
   store.replaceState(state, history)
   saveStateNow(store.state)
-  log('Sidebar zaimportowany, importuję sesje w tle…')
+  log('Sidebar imported, importing sessions in the background…')
   // Cookies go last and don't block startup: the Keychain prompt may take a while
   importCookies(profiles, log)
     .then(() => {
-      log('Gotowe.')
+      log('Done.')
       // Pages opened before cookies landed need a reload to pick up logins
       for (const id of Object.keys(tabs.runtime())) tabs.webContents(id)?.reload()
     })
-    .catch((err) => log(`  ! ciasteczka pominięte: ${(err as Error).message}`))
+    .catch((err) => log(`  ! cookies skipped: ${(err as Error).message}`))
 }
 
 // Links from other apps (when Drift is the default browser) can arrive before the window exists

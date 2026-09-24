@@ -10,7 +10,7 @@ export const actions = {
   move: (id: ItemId, target: DropTarget) => call('move', id, $state.snapshot(target)),
   rename: (id: ItemId, title: string) => call('rename', id, title),
   itemMenu: (id: ItemId) => call('item-menu', id),
-  newTab: (input: string) => call('new-tab', input),
+  newTab: (input: string, opts?: { incognito?: boolean }) => call('new-tab', input, opts),
   navigate: (input: string) => call('navigate', input),
   nav: (action: 'back' | 'forward' | 'reload') => call('nav', action),
   switchWorkspace: (id: string) => call('switch-workspace', id),
@@ -72,7 +72,7 @@ export const drag = $state<{ id: ItemId | null }>({ id: null })
 export const ui = $state({
   peekOpen: false,
   animating: false,
-  palette: null as 'new' | 'edit' | null,
+  palette: null as 'new' | 'edit' | 'incognito' | null,
   paletteQuery: '',
   renaming: null as string | null,
   editingWorkspace: null as string | null,

@@ -15,7 +15,7 @@
     snap: Snapshot
     renaming: string | null
     editingWorkspace: string | null
-    onpalette: (mode: 'new' | 'edit') => void
+    onpalette: (mode: 'new' | 'edit' | 'incognito') => void
   } = $props()
 
   const ws = $derived(workspace(snap))
@@ -71,19 +71,19 @@
 <aside class="sidebar" onwheel={onWheel}>
   <header class="top">
     <div class="traffic"></div>
-    <button class="ib" title="Ukryj sidebar (⌘S)" onclick={actions.toggleCompact}><Icon name="sidebar" /></button>
+    <button class="ib" title="Hide sidebar (⌘S)" onclick={actions.toggleCompact}><Icon name="sidebar" /></button>
     <div class="spacer"></div>
-    <button class="ib" title="Wstecz (⌘[)" disabled={!rt?.canGoBack} onclick={() => actions.nav('back')}><Icon name="back" /></button>
-    <button class="ib" title="Dalej (⌘])" disabled={!rt?.canGoForward} onclick={() => actions.nav('forward')}><Icon name="forward" /></button>
-    <button class="ib" title="Odśwież (⌘R)" onclick={() => actions.nav('reload')}><Icon name="reload" /></button>
+    <button class="ib" title="Back (⌘[)" disabled={!rt?.canGoBack} onclick={() => actions.nav('back')}><Icon name="back" /></button>
+    <button class="ib" title="Forward (⌘])" disabled={!rt?.canGoForward} onclick={() => actions.nav('forward')}><Icon name="forward" /></button>
+    <button class="ib" title="Reload (⌘R)" onclick={() => actions.nav('reload')}><Icon name="reload" /></button>
   </header>
 
   <div class="url" role="button" tabindex="0" onclick={() => onpalette(current ? 'edit' : 'new')} onkeydown={() => {}}>
-    <span class="host">{url ? hostOf(url) : 'Szukaj lub wpisz adres'}</span>
+    <span class="host">{url ? hostOf(url) : 'Search or enter address'}</span>
     {#if url}
       <button
         class="ib small"
-        title="Kopiuj link (⌘⇧C)"
+        title="Copy link (⌘⇧C)"
         onclick={(e) => {
           e.stopPropagation()
           actions.copyUrl()
@@ -124,14 +124,14 @@
         <TreeItem {snap} {id} zone="pinned" index={i} bind:renaming />
       {/each}
       {#if !ws.pinned.length}
-        <div class="placeholder">Przeciągnij tu karty, aby je przypiąć</div>
+        <div class="placeholder">Drag tabs here to pin them</div>
       {/if}
     </section>
 
     <div class="divider">
       <span class="line"></span>
       {#if ws.today.length}
-        <button class="txt" title="Sortuj według domeny" onclick={actions.tidy}><Icon name="broom" size={13} /> Tidy</button>
+        <button class="txt" title="Sort by domain" onclick={actions.tidy}><Icon name="broom" size={13} /> Tidy</button>
         <button class="txt" onclick={actions.clear}>Clear</button>
       {/if}
     </div>
@@ -150,7 +150,7 @@
 
   {#if showArchive}
     <div class="archive">
-      <div class="archive-head">Archiwum <button class="ib small" onclick={() => (showArchive = false)}><Icon name="x" size={14} /></button></div>
+      <div class="archive-head">Archive <button class="ib small" onclick={() => (showArchive = false)}><Icon name="x" size={14} /></button></div>
       {#each snap.state.archive.slice(0, 80) as a, i (a.archivedAt + a.url)}
         <button
           class="arow"
@@ -163,13 +163,13 @@
           <span class="t">{a.title}</span>
         </button>
       {:else}
-        <div class="placeholder">Brak zamkniętych kart</div>
+        <div class="placeholder">No closed tabs</div>
       {/each}
     </div>
   {/if}
 
   <footer class="bottom">
-    <button class="ib" title="Archiwum" onclick={() => (showArchive = !showArchive)}><Icon name="archive" /></button>
+    <button class="ib" title="Archive" onclick={() => (showArchive = !showArchive)}><Icon name="archive" /></button>
     <div class="dots">
       {#each snap.state.workspaces as w (w.id)}
         <button
@@ -186,7 +186,7 @@
         </button>
       {/each}
     </div>
-    <button class="ib" title="Nowy workspace" onclick={actions.newWorkspace}><Icon name="plus" /></button>
+    <button class="ib" title="New workspace" onclick={actions.newWorkspace}><Icon name="plus" /></button>
   </footer>
 </aside>
 

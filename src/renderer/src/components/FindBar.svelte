@@ -30,11 +30,11 @@
 </script>
 
 <div class="bar">
-  <input bind:this={input} bind:value={query} onkeydown={onKey} placeholder="Znajdź na stronie" spellcheck="false" autofocus />
+  <input bind:this={input} bind:value={query} onkeydown={onKey} placeholder="Find on page" spellcheck="false" autofocus />
   <span class="count">{result && query ? `${result.active}/${result.total}` : ''}</span>
-  <button title="Poprzednie (⇧↵)" onclick={() => step(false)}><Icon name="back" size={14} /></button>
-  <button title="Następne (↵)" onclick={() => step(true)}><Icon name="forward" size={14} /></button>
-  <button title="Zamknij (Esc)" onclick={() => call('find-close')}><Icon name="x" size={14} /></button>
+  <button title="Previous (⇧↵)" onclick={() => step(false)}><Icon name="back" size={14} /></button>
+  <button title="Next (↵)" onclick={() => step(true)}><Icon name="forward" size={14} /></button>
+  <button title="Close (Esc)" onclick={() => call('find-close')}><Icon name="x" size={14} /></button>
 </div>
 
 <style>

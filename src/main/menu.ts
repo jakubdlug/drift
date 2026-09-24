@@ -19,6 +19,13 @@ export interface MenuActions {
   devtoolsChrome: () => void
   newFolder: () => void
   newWorkspace: () => void
+  newIncognito: () => void
+  tabAt: (index: number) => void
+  cycleTab: (delta: number) => void
+  duplicateTab: () => void
+  stop: () => void
+  print: () => void
+  viewSource: () => void
   find: () => void
   findNext: () => void
   findPrev: () => void
@@ -37,7 +44,7 @@ export function buildMenu(a: MenuActions): Menu {
       role: 'appMenu',
       submenu: [
         { role: 'about' },
-        { label: 'Ustaw jako domyślną przeglądarkę', click: a.setDefaultBrowser },
+        { label: 'Set as default browser', click: a.setDefaultBrowser },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -49,18 +56,22 @@ export function buildMenu(a: MenuActions): Menu {
       ]
     },
     {
-      label: 'Plik',
+      label: 'File',
       submenu: [
-        { label: 'Nowa karta', accelerator: 'Cmd+T', click: a.newTab },
-        { label: 'Nowy folder', accelerator: 'Cmd+Shift+N', click: a.newFolder },
-        { label: 'Nowy workspace', accelerator: 'Cmd+Ctrl+N', click: a.newWorkspace },
+        { label: 'New tab', accelerator: 'Cmd+T', click: a.newTab },
+        { label: 'New incognito tab', accelerator: 'Cmd+Shift+N', click: a.newIncognito },
+        { label: 'Duplicate tab', accelerator: 'Cmd+Shift+K', click: a.duplicateTab },
+        { label: 'New folder', accelerator: 'Cmd+Alt+N', click: a.newFolder },
+        { label: 'New workspace', accelerator: 'Cmd+Ctrl+N', click: a.newWorkspace },
         { type: 'separator' },
-        { label: 'Zamknij kartę', accelerator: 'Cmd+W', click: a.closeTab },
-        { label: 'Przywróć zamkniętą kartę', accelerator: 'Cmd+Shift+T', click: a.reopen }
+        { label: 'Close tab', accelerator: 'Cmd+W', click: a.closeTab },
+        { label: 'Reopen closed tab', accelerator: 'Cmd+Shift+T', click: a.reopen },
+        { type: 'separator' },
+        { label: 'Print…', accelerator: 'Cmd+P', click: a.print }
       ]
     },
     {
-      label: 'Edycja',
+      label: 'Edit',
       submenu: [
         { role: 'undo' },
         { role: 'redo' },
@@ -71,44 +82,56 @@ export function buildMenu(a: MenuActions): Menu {
         { role: 'pasteAndMatchStyle' },
         { role: 'selectAll' },
         { type: 'separator' },
-        { label: 'Znajdź na stronie', accelerator: 'Cmd+F', click: a.find },
-        { label: 'Następne wystąpienie', accelerator: 'Cmd+G', click: a.findNext },
-        { label: 'Poprzednie wystąpienie', accelerator: 'Cmd+Shift+G', click: a.findPrev },
+        { label: 'Find on page', accelerator: 'Cmd+F', click: a.find },
+        { label: 'Find next', accelerator: 'Cmd+G', click: a.findNext },
+        { label: 'Find previous', accelerator: 'Cmd+Shift+G', click: a.findPrev },
         { type: 'separator' },
-        { label: 'Kopiuj URL', accelerator: 'Cmd+Shift+C', click: a.copyUrl }
+        { label: 'Copy URL', accelerator: 'Cmd+Shift+C', click: a.copyUrl }
       ]
     },
     {
-      label: 'Widok',
+      label: 'View',
       submenu: [
-        { label: 'Pokaż/ukryj sidebar', accelerator: 'Cmd+S', click: a.toggleSidebar },
-        { label: 'Edytuj adres', accelerator: 'Cmd+L', click: a.editUrl },
+        { label: 'Show/hide sidebar', accelerator: 'Cmd+S', click: a.toggleSidebar },
+        { label: 'Edit address', accelerator: 'Cmd+L', click: a.editUrl },
         { type: 'separator' },
-        { label: 'Odśwież', accelerator: 'Cmd+R', click: a.reload },
-        { label: 'Odśwież bez cache', accelerator: 'Cmd+Shift+R', click: a.hardReload },
+        { label: 'Reload', accelerator: 'Cmd+R', click: a.reload },
+        { label: 'Reload ignoring cache', accelerator: 'Cmd+Shift+R', click: a.hardReload },
+        { label: 'Stop', accelerator: 'Cmd+.', click: a.stop },
+        { label: 'View source', accelerator: 'Cmd+Alt+U', click: a.viewSource },
         { type: 'separator' },
-        { label: 'Powiększ', accelerator: 'Cmd+=', click: () => a.zoom(1) },
-        { label: 'Pomniejsz', accelerator: 'Cmd+-', click: () => a.zoom(-1) },
-        { label: 'Rzeczywisty rozmiar', accelerator: 'Cmd+0', click: () => a.zoom(0) },
+        { label: 'Zoom in', accelerator: 'Cmd+=', click: () => a.zoom(1) },
+        { label: 'Zoom out', accelerator: 'Cmd+-', click: () => a.zoom(-1) },
+        { label: 'Actual size', accelerator: 'Cmd+0', click: () => a.zoom(0) },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        { label: 'DevTools strony', accelerator: 'Cmd+Alt+I', click: a.devtoolsPage },
-        { label: 'DevTools sidebara', accelerator: 'Cmd+Alt+Shift+I', click: a.devtoolsChrome }
+        { label: 'Page DevTools', accelerator: 'Cmd+Alt+I', click: a.devtoolsPage },
+        { label: 'Sidebar DevTools', accelerator: 'Cmd+Alt+Shift+I', click: a.devtoolsChrome }
       ]
     },
     {
-      label: 'Karta',
+      label: 'Tab',
       submenu: [
-        { label: 'Wstecz', accelerator: 'Cmd+[', click: a.back },
-        { label: 'Dalej', accelerator: 'Cmd+]', click: a.forward },
-        { label: 'Przypnij / odepnij', accelerator: 'Cmd+D', click: a.togglePin }
+        { label: 'Back', accelerator: 'Cmd+[', click: a.back },
+        { label: 'Forward', accelerator: 'Cmd+]', click: a.forward },
+        { label: 'Pin / unpin', accelerator: 'Cmd+D', click: a.togglePin },
+        { type: 'separator' },
+        { label: 'Next tab', accelerator: 'Ctrl+Tab', click: () => a.cycleTab(1) },
+        { label: 'Previous tab', accelerator: 'Ctrl+Shift+Tab', click: () => a.cycleTab(-1) },
+        { label: 'Next tab ', accelerator: 'Cmd+Alt+Down', click: () => a.cycleTab(1), visible: false },
+        { label: 'Previous tab ', accelerator: 'Cmd+Alt+Up', click: () => a.cycleTab(-1), visible: false },
+        { label: 'Next tab  ', accelerator: 'Cmd+Shift+]', click: () => a.cycleTab(1), visible: false },
+        { label: 'Previous tab  ', accelerator: 'Cmd+Shift+[', click: () => a.cycleTab(-1), visible: false },
+        { type: 'separator' },
+        ...Array.from({ length: 8 }, (_, i) => ({ label: `Tab ${i + 1}`, accelerator: `Cmd+${i + 1}`, click: () => a.tabAt(i) })),
+        { label: 'Last tab', accelerator: 'Cmd+9', click: () => a.tabAt(-1) }
       ]
     },
     {
       label: 'Workspace',
       submenu: [
-        { label: 'Poprzedni', accelerator: 'Cmd+Alt+Left', click: () => a.cycleWorkspace(-1) },
-        { label: 'Następny', accelerator: 'Cmd+Alt+Right', click: () => a.cycleWorkspace(1) },
+        { label: 'Previous', accelerator: 'Cmd+Alt+Left', click: () => a.cycleWorkspace(-1) },
+        { label: 'Next', accelerator: 'Cmd+Alt+Right', click: () => a.cycleWorkspace(1) },
         { type: 'separator' },
         ...workspaces
       ]

@@ -237,7 +237,7 @@ export function copyStorage(profiles: ImportedProfile[], log: (m: string) => voi
       rmSync(join(target, dir), { recursive: true, force: true })
       cpSync(src, join(target, dir), { recursive: true, filter: (f) => !f.endsWith('LOCK') })
     }
-    log(`  • ${p.profile.name}: skopiowano Local Storage + IndexedDB`)
+    log(`  • ${p.profile.name}: copied Local Storage + IndexedDB`)
   }
 }
 
@@ -329,6 +329,6 @@ export async function importCookies(profiles: ImportedProfile[], log: (m: string
       }
     }
     await withTimeout(ses.cookies.flushStore(), 10000).catch(() => {})
-    log(`  • ${p.profile.name}: ${ok} ciasteczek${failed ? ` (${failed} pominięto)` : ''}`)
+    log(`  • ${p.profile.name}: ${ok} cookies${failed ? ` (${failed} skipped)` : ''}`)
   }
 }

@@ -29,10 +29,10 @@ const MAX_LINES = 400
 const refs = new WeakMap<WebContents, Map<number, number>>()
 
 async function cdp<T = Record<string, unknown>>(wc: WebContents, method: string, params: object = {}): Promise<T> {
+  if (wc.isDestroyed()) throw new Error('The tab has been closed')
   const dbg = wc.debugger
   if (!dbg.isAttached()) {
     dbg.attach('1.3')
-    wc.once('destroyed', () => dbg.isAttached() && dbg.detach())
   }
   return (await dbg.sendCommand(method, params)) as T
 }
@@ -162,20 +162,20 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
   }
 
   const root = opts.rootBackendId ? nodes.find((n) => n.backendDOMNodeId === opts.rootBackendId) : nodes[0]
-  if (!root) throw new Error('Nie znaleziono węzła do snapshotu')
+  if (!root) throw new Error('No node found to snapshot')
   walk(root.nodeId, 0)
   let out = lines
   if (filter) {
     // Keep only the deepest match of each branch: row > cell > checkbox all repeat the same text
     out = lines.filter((_, i) => !(i + 1 < lines.length && depths[i + 1] > depths[i])).map((l) => l.trimStart())
   }
-  if (lines.length >= MAX_LINES) out.push(`… ucięto po ${MAX_LINES} liniach (zawęź --filter)`)
-  return out.join('\n') || (filter ? `(brak elementów zawierających "${opts.filter}")` : '(pusto — brak elementów w widoku)')
+  if (lines.length >= MAX_LINES) out.push(`… truncated after ${MAX_LINES} lines (narrow with --filter)`)
+  return out.join('\n') || (filter ? `(no elements containing "${opts.filter}")` : '(empty — no elements in view)')
 }
 
 export function refNode(wc: WebContents, ref: number): number {
   const backendNodeId = refs.get(wc)?.get(ref)
-  if (!backendNodeId) throw new Error(`Brak ref ${ref} — zrób najpierw świeży tree`)
+  if (!backendNodeId) throw new Error(`No ref ${ref} — take a fresh tree first`)
   return backendNodeId
 }
 
@@ -270,7 +270,7 @@ export async function nodePoint(wc: WebContents, backendNodeId: number): Promise
   await cdp(wc, 'DOM.enable')
   await cdp(wc, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }).catch(() => {})
   const { quads } = await cdp<{ quads: number[][] }>(wc, 'DOM.getContentQuads', { backendNodeId })
-  if (!quads.length) throw new Error('Element nie ma widocznego obszaru')
+  if (!quads.length) throw new Error('The element has no visible area')
   const q = quads[0]
   return { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4, backendNodeId }
 }

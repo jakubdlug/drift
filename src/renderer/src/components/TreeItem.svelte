@@ -68,6 +68,7 @@
   <div
     class="row"
     class:active
+    class:incognito={item.incognito}
     class:folder={item.kind === 'folder'}
     class:dim={item.kind === 'tab' && !loaded && !today}
     class:drop-before={dropPos === 'before'}
@@ -119,12 +120,13 @@
       <span class="title">{displayTitle(item, rt, today)}</span>
     {/if}
 
+    {#if item.incognito}<span class="private" title="Incognito">🕶</span>{/if}
     {#if rt?.audible}<span class="audio"><Icon name="speaker" size={14} /></span>{/if}
 
     {#if item.kind === 'tab' && (today || loaded)}
       <button
         class="close"
-        title={today ? 'Zamknij' : 'Wyładuj'}
+        title={today ? 'Close' : 'Unload'}
         onclick={(e) => {
           e.stopPropagation()
           actions.close(id)
@@ -140,7 +142,7 @@
       <Self {snap} id={child} zone="folder" parentId={id} index={i} depth={depth + 1} bind:renaming />
     {/each}
     {#if !item.children?.length}
-      <div class="empty" style="padding-left:{34 + depth * 14}px">Pusty folder</div>
+      <div class="empty" style="padding-left:{34 + depth * 14}px">Empty folder</div>
     {/if}
   {/if}
 {/if}
@@ -163,6 +165,9 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
   }
   .row.dim .title { opacity: 0.72; }
+  .row.incognito { background: rgba(140, 100, 255, 0.1); }
+  .row.incognito.active { background: rgba(140, 100, 255, 0.24); }
+  .private { font-size: 12px; opacity: 0.8; }
   .folder .title { font-weight: 600; }
   .icon {
     flex: none;

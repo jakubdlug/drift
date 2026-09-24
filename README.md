@@ -1,113 +1,121 @@
 # Drift
 
-Lekka przeglądarka w stylu Arc na Electronie (Chromium). Vertical tabs z auto-ukrywaniem, workspace'y z izolowanymi sesjami, Essentials, pinned z folderami, archiwum i usypianie kart.
+A lightweight Arc-style browser on Electron (Chromium). Vertical tabs with auto-hide, workspaces with isolated sessions, Essentials, pinned tabs with folders, archiving and tab sleeping.
 
 ## Start
 
 ```bash
 npm install
-npm run live         # iteracja na żywo: sidebar HMR, zmiany w main → auto-restart
-npm run install-app  # zbuduj i podmień /Applications/Drift.app
-npm run dev          # jak live, ale bez auto-restartu procesu głównego
-npm run import:arc   # ponowny import z Arca (nadpisuje stan Drifta)
-npm run dist         # Drift.app w dist/
+npm run live         # live iteration: sidebar HMR, changes in main → auto-restart
+npm run install-app  # build and replace /Applications/Drift.app
+npm run dev          # like live, but without auto-restarting the main process
+npm run import:arc   # re-import from Arc (overwrites Drift state)
+npm run dist         # Drift.app in dist/
 ```
 
-Pierwsze uruchomienie importuje dane z Arca automatycznie, jeśli Arc jest zainstalowany.
+The first launch imports data from Arc automatically, if Arc is installed.
 
-## Iteracja na żywo
+## Live iteration
 
-`npm run live` zamyka zainstalowany Drift (dane są wspólne, a dwie instancje naraz by je uszkodziły) i startuje wersję dev:
+`npm run live` closes the installed Drift (the data is shared, and two instances at once would corrupt it) and starts the dev version:
 
-- zmiany w `src/renderer` (Svelte, CSS) są widoczne od razu, bez przeładowania stron,
-- zmiany w `src/main` / `src/preload` restartują aplikację; stan się zapisuje, aktywne karty wracają.
+- changes in `src/renderer` (Svelte, CSS) show up immediately, without reloading pages,
+- changes in `src/main` / `src/preload` restart the app; state is saved, active tabs come back.
 
-Gdy wersja jest dobra: `npm run install-app`.
+When the version is good: `npm run install-app`.
 
-## Co jest importowane z Arca
+## What is imported from Arc
 
-- Space'y → workspace'y (nazwa, emoji, kolor), profile → osobne sesje (`persist:arc-*`)
-- Essentials (per profil), pinned z folderami, karty Today, favicony
-- Historia (do podpowiedzi w ⌘T)
-- Sesje: ciasteczka (odszyfrowane kluczem „Arc Safe Storage”), Local Storage, IndexedDB
+- Spaces → workspaces (name, emoji, color), profiles → separate sessions (`persist:arc-*`)
+- Essentials (per profile), pinned tabs with folders, Today tabs, favicons
+- History (for ⌘T suggestions)
+- Sessions: cookies (decrypted with the "Arc Safe Storage" key), Local Storage, IndexedDB
 
-Nie są importowane: hasła, rozszerzenia, Boosts, Easels.
+Not imported: passwords, extensions, Boosts, Easels.
 
-## Skróty
+## Shortcuts
 
-| Skrót | Akcja |
+| Shortcut | Action |
 |---|---|
-| ⌘T / ⌘L | Nowa karta / edycja adresu (paleta z podpowiedziami) |
-| ⌘W / ⌘⇧T | Zamknij kartę (Today → archiwum) / przywróć |
-| ⌘S | Pokaż/ukryj sidebar (w trybie ukrytym wysuwa się przy lewej krawędzi) |
-| ⌘D | Przypnij / odepnij |
-| ⌘⇧C | Kopiuj URL |
-| Ctrl+1…9, ⌘⌥←/→, swipe dwoma palcami | Przełączanie workspace'ów |
-| ⌘[ / ⌘] / ⌘R | Wstecz / dalej / odśwież |
+| ⌘T / ⌘L | New tab / edit address (palette with suggestions) |
+| ⌘⇧N | New incognito tab (separate in-memory session, no history or archive) |
+| ⌘W / ⌘⇧T | Close tab (Today → archive, returns to the previous tab) / restore |
+| ⌘⇧K | Duplicate tab |
+| ⌘1…⌘8 / ⌘9 | Nth / last tab (Essentials → pinned → Today) |
+| ⌃Tab / ⌃⇧Tab, ⌘⌥↓ / ⌘⌥↑, ⌘⇧] / ⌘⇧[ | Next / previous tab |
+| ⌘S | Show/hide sidebar (in hidden mode it slides out at the left edge) |
+| ⌘D | Pin / unpin |
+| ⌘⇧C | Copy URL |
+| ⌘F / ⌘G / ⌘⇧G | Find on page / next / previous |
+| ⌘R / ⌘⇧R / ⌘. | Reload / without cache / stop |
+| ⌘[ / ⌘] | Back / forward |
+| ⌘P / ⌘⌥U | Print / page source |
+| ⌘⌥N / ⌘⌃N | New folder / new workspace |
+| Ctrl+1…9, ⌘⌥←/→, two-finger swipe | Switch workspaces |
 
-## Architektura
+## Architecture
 
-- `src/main/store.ts` — stan sidebara (jedno źródło prawdy), zapis do `~/Library/Application Support/Drift/state.json`
-- `src/main/tabs.ts` — `WebContentsView` na kartę, usypianie po `sleepAfterMin` minutach
-- `src/main/index.ts` — okno (`BaseWindow`), layout, IPC, archiwizacja Today po `archiveAfterHours`
-- `src/main/arc-import.ts` — import z Arca
-- `src/renderer` — sidebar w Svelte 5, rysowany w osobnym przezroczystym `WebContentsView` nad stroną
+- `src/main/store.ts` — sidebar state (single source of truth), saved to `~/Library/Application Support/Drift/state.json`
+- `src/main/tabs.ts` — `WebContentsView` per tab, sleeping after `sleepAfterMin` minutes
+- `src/main/index.ts` — window (`BaseWindow`), layout, IPC, Today archiving after `archiveAfterHours`
+- `src/main/arc-import.ts` — import from Arc
+- `src/renderer` — sidebar in Svelte 5, drawn in a separate transparent `WebContentsView` above the page
 
-## Sterowanie z zewnątrz (dla agentów i skryptów)
+## External control (for agents and scripts)
 
-W trybie deweloperskim (albo z flagą `--control`) Drift wystawia kanał sterowania na `127.0.0.1` z losowym tokenem w `~/Library/Application Support/Drift/control.json` (0600).
+In dev mode (or with the `--control` flag) Drift exposes a control channel on `127.0.0.1` with a random token in `~/Library/Application Support/Drift/control.json` (0600).
 
 ```bash
-scripts/drift-ctl state                 # workspace, aktywna karta, pinned/today
-scripts/drift-ctl status                # płaski status: mode, url, peekOpen, palette, focus…
-scripts/drift-ctl wait mode=edge animating=false   # czekaj na warunek zamiast sleep
+scripts/drift-ctl state                 # workspace, active tab, pinned/today
+scripts/drift-ctl status                # flat status: mode, url, peekOpen, palette, focus…
+scripts/drift-ctl wait mode=edge animating=false   # wait for a condition instead of sleep
 scripts/drift-ctl wait page selector=video --timeout 8000
-scripts/drift-ctl tree page --filter /watch        # drzewo dostępności z [ref] i linkami
-scripts/drift-ctl click page 46         # klik po ref (albo po tekście, --right, --double)
-scripts/drift-ctl menu "Nowa karta"     # pozycja menu aplikacji
-scripts/drift-ctl type sidebar github   # wpisywanie
-scripts/drift-ctl key sidebar Enter     # klawisze (--mod cmd,shift)
-scripts/drift-ctl text page             # tekst aktywnej strony
-scripts/drift-ctl logs                  # błędy konsoli sidebara
+scripts/drift-ctl tree page --filter /watch        # accessibility tree with [ref] and links
+scripts/drift-ctl click page 46         # click by ref (or by text, --right, --double)
+scripts/drift-ctl menu "New tab"        # app menu item
+scripts/drift-ctl type sidebar github   # typing
+scripts/drift-ctl key sidebar Enter     # keys (--mod cmd,shift)
+scripts/drift-ctl text page             # text of the active page
+scripts/drift-ctl logs                  # sidebar console errors
 ```
 
-Wskazywanie elementów (`<sel>`): `12` (ref z `tree`), `button Wyślij` (rola + nazwa dostępności), `Wyślij` (sama nazwa), `css:.tile`, `text:Clear`. Gdy nic nie pasuje, błąd (także timeout `wait el=`) podaje najbardziej podobne elementy. Prefiks `~` (`menuitem ~Szybkość`) akceptuje jedyny podobny element, gdy brak dokładnego — raport oznacza to `≈`. Role pól tekstowych (`textbox`, `combobox`, `searchbox`) są wymienne, a „1.5” == „1,5”.
+Pointing at elements (`<sel>`): `12` (ref from `tree`), `button Send` (role + accessible name), `Send` (name only), `css:.tile`, `text:Clear`. When nothing matches, the error (including a `wait el=` timeout) lists the most similar elements. The `~` prefix (`menuitem ~Speed`) accepts the only similar element when there is no exact match — the report marks this with `≈`. Text-field roles (`textbox`, `combobox`, `searchbox`) are interchangeable, and "1.5" == "1,5".
 
-Cały scenariusz można wysłać w **jednym** zapytaniu (`run`, stop na pierwszym błędzie):
+An entire scenario can be sent in a **single** request (`run`, stops on the first error):
 
 ```bash
 scripts/drift-ctl run <<'EOF'
 open Gmail
-wait page el=button Utwórz --timeout 15000
-click page button Utwórz
-wait page el=textbox Temat
-type page odbiorca@example.com
+wait page el=button Compose --timeout 15000
+click page button Compose
+wait page el=textbox Subject
+type page recipient@example.com
 key page Enter
-fill page textbox Temat "Temat maila"
-fill page "textbox Treść wiadomości" "Treść"
-snapshot page region "Temat maila"
+fill page textbox Subject "Email subject"
+fill page "textbox Message body" "Body"
+snapshot page region "Email subject"
 EOF
 ```
 
-Zawężanie: `--within <sel>` (tylko w kontenerze), `--near <sel>` (element najbliższy kotwicy — ta sama karta/wiersz), `--all`, `--nth N`. Warunki `wait`: `idle` (strona się uspokoiła — pewniejsze niż tytuł w SPA), `heading~`, alternatywa `a | b`, `--fail "<warunek>"`. Zmienne w `run`: `extract page /regex/ --as ids`, potem `${ids[0]}`, `${ids|lines|url}`. `goto <url>` sprawdza, że strona faktycznie się otworzyła (`--new`, `--force`).
+Narrowing: `--within <sel>` (only inside a container), `--near <sel>` (the element closest to the anchor — same card/row), `--all`, `--nth N`. `wait` conditions: `idle` (the page has settled — more reliable than the title in an SPA), `heading~`, alternative `a | b`, `--fail "<condition>"`. Variables in `run`: `extract page /regex/ --as ids`, then `${ids[0]}`, `${ids|lines|url}`. `goto <url>` verifies that the page actually opened (`--new`, `--force`).
 
-Każda komenda zmieniająca stan sama raportuje:
-- `Δ` — co zmieniło się w statusie (tryb, URL, paleta, fokus…),
-- `→ trafiono` — element, który faktycznie dostał klik; zasłonięty lub niewidoczny cel jest blokowany (`--force` wymusza),
-- `✖` — nowe błędy konsoli i nieudane ładowania od poprzedniej komendy,
-- `⚠ Drift zrestartował się` — gdy zmieniła się instancja między komendami.
+Every state-changing command reports on its own:
+- `Δ` — what changed in the status (mode, URL, palette, focus…),
+- `→ hit` — the element that actually received the click; an obscured or invisible target is blocked (`--force` forces it),
+- `✖` — new console errors and failed loads since the previous command,
+- `⚠ Drift restarted` — when the instance changed between commands.
 
-Ze stron raportowane są wyłącznie adres, tytuł, stan ładowania i błędy — treść (`tree page`, `text page`) tylko na żądanie.
+From pages, only the address, title, loading state and errors are reported — content (`tree page`, `text page`) only on request.
 
-## Skill dla agentów (Claude Code)
+## Skill for agents (Claude Code)
 
-`skill/drift-browser/SKILL.md` uczy agenta sterować Driftem przez `drift-ctl` — bez zrzutów ekranu, całymi scenariuszami w jednym zapytaniu, z hasłami z 1Password.
+`skill/drift-browser/SKILL.md` teaches the agent to control Drift through `drift-ctl` — without screenshots, in whole scenarios in a single request, with passwords from 1Password.
 
 ```bash
 ln -sfn "$PWD/skill/drift-browser" ~/.claude/skills/drift-browser
-ln -sfn "$PWD/scripts/drift-ctl" ~/bin/drift-ctl   # dowolny katalog z PATH
+ln -sfn "$PWD/scripts/drift-ctl" ~/bin/drift-ctl   # any directory on PATH
 ```
 
-## Licencja
+## License
 
 MIT
