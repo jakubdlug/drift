@@ -81,7 +81,7 @@ open Gmail
 wait page el=button Utwórz --timeout 15000
 click page button Utwórz
 wait page el=textbox Temat
-type page kontakt@teceer.com
+type page odbiorca@example.com
 key page Enter
 fill page textbox Temat "Temat maila"
 fill page "textbox Treść wiadomości" "Treść"
@@ -98,3 +98,16 @@ Każda komenda zmieniająca stan sama raportuje:
 - `⚠ Drift zrestartował się` — gdy zmieniła się instancja między komendami.
 
 Ze stron raportowane są wyłącznie adres, tytuł, stan ładowania i błędy — treść (`tree page`, `text page`) tylko na żądanie.
+
+## Skill dla agentów (Claude Code)
+
+`skill/drift-browser/SKILL.md` uczy agenta sterować Driftem przez `drift-ctl` — bez zrzutów ekranu, całymi scenariuszami w jednym zapytaniu, z hasłami z 1Password.
+
+```bash
+ln -sfn "$PWD/skill/drift-browser" ~/.claude/skills/drift-browser
+ln -sfn "$PWD/scripts/drift-ctl" ~/bin/drift-ctl   # dowolny katalog z PATH
+```
+
+## Licencja
+
+MIT

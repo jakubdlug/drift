@@ -5,8 +5,8 @@ description: Steruje przeglądarką Drift (własna przeglądarka usera, zamienni
 
 # Drift — sterowanie przeglądarką
 
-Drift to przeglądarka usera (Electron, `~/teceer/drift`). Steruję nią wyłącznie przez
-`drift-ctl` (`~/bin/drift-ctl` → `~/teceer/drift/scripts/drift-ctl`). **Bez zrzutów ekranu.**
+Drift to przeglądarka usera (Electron, repo `drift`). Steruję nią wyłącznie przez
+`drift-ctl` (w PATH, symlink do `<repo>/scripts/drift-ctl`). **Bez zrzutów ekranu.**
 
 ## Zanim zaczniesz
 
@@ -17,7 +17,7 @@ drift-ctl status        # działa? jaki workspace, karta, tryb sidebara
 - "Drift nie działa albo kanał sterowania jest wyłączony" → sprawdź `pgrep -x Drift` /
   `pgrep -f drift/node_modules/electron`. Jeśli Drift działa bez kanału, **zapytaj usera**
   (Telegram) zanim go zrestartujesz — ma w nim otwarte, zalogowane strony. Start z kanałem:
-  `open -a /Applications/Drift.app --args --control` albo tryb dev `cd ~/teceer/drift && npm run live`.
+  `open -a /Applications/Drift.app --args --control` albo tryb dev `npm run live` w katalogu repo.
 - Nigdy `pkill` działającego Drifta. Nie edytuj `src/main` w trybie live w trakcie pracy na
   żywej stronie — każdy restart przeładowuje karty (niezapisane formularze, **sesje banków**
   i cache sekretów przepadają → kolejne logowanie, Touch ID, SMS).
@@ -32,7 +32,7 @@ open Gmail
 wait page url~mail.google.com el=button Utwórz idle --timeout 15000
 click page button Utwórz
 wait page el=textbox Temat
-type page kontakt@teceer.com
+type page odbiorca@example.com
 key page Enter
 fill page textbox Temat "Temat"
 fill page "textbox Treść wiadomości" "Treść"
@@ -90,14 +90,16 @@ Target: `page` (aktywna karta), `sidebar` (UI Drifta), `find` (pasek ⌘F).
 - Hasła **tylko z 1Password**, przez odnośnik — wartość nigdy nie trafia do kontekstu:
   `drift-ctl secrets ing` → `fill page textbox Login --secret op://Personal/<id>/login`.
   Czyta sam Drift (jedno Touch ID na sesję, cache w pamięci 30 min; OTP: `?attribute=otp`).
-- **Nigdy nie proś o hasło na Telegramie.** Kody SMS/potwierdzenia w aplikacji banku:
-  `~/.agents/skills/telegram/scripts/telegram-ask.sh "…"` i wpisz kod klawiszami, nie echuj go.
+- **Nigdy nie proś o hasło w czacie ani komunikatorze.** Kody SMS / potwierdzenia w aplikacji
+  banku: zapytaj usera (np. Telegram) i wpisz kod klawiszami, nie echuj go.
 - Pola wypełnione sekretem są maskowane w `tree`/`snapshot`, ale strona może sama wyświetlić
   login (np. nagłówek) — nie przepisuj go do odpowiedzi.
 
 ## Bezpieczeństwo działań
 
 - Bank, KSeF, płatności: **tylko odczyt**. Nie zlecaj przelewów, nie akceptuj niczego.
+- Pytania do usera w trakcie zadania (kody SMS, potwierdzenia) zadawaj kanałem, którego
+  używa (np. skill Telegram), nie przerywaj pracy bez potrzeby.
 - Działania wychodzące (wysłanie maila, publikacja, usunięcie): jeśli user nie poprosił
   wprost — zapytaj. Przed wysłaniem zrób `snapshot` i porównaj pola z tym, co miało być
   (dwa `run`: wypełnij+podgląd, potem wyślij).
