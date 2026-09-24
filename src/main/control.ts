@@ -1,5 +1,7 @@
 import { app, Menu, type MenuItem, type WebContents } from 'electron'
+import { execFile } from 'child_process'
 import { randomBytes, randomUUID } from 'crypto'
+import { promisify } from 'util'
 import { writeFileSync } from 'fs'
 import { createServer } from 'http'
 import type { AddressInfo } from 'net'
@@ -62,7 +64,7 @@ export function captureConsole(wc: WebContents, label: string): void {
 
 /** Pages: only errors and failed loads, truncated — no regular console output */
 /** Third-party ad/tracking noise that says nothing about whether a task worked */
-const NOISE = /doubleclick|googleads|googlesyndication|google-analytics|googletagmanager|adservice|ERR_BLOCKED_BY_CLIENT|net::ERR_ABORTED/i
+const NOISE = /doubleclick|googleads|googlesyndication|google-analytics|googletagmanager|adservice|ERR_BLOCKED_BY_CLIENT|net::ERR_ABORTED|wss?:\/\/127\.0\.0\.1:\d+/i
 
 export function capturePageErrors(wc: WebContents): void {
   wc.on('console-message', (e) => {
@@ -93,6 +95,32 @@ function newErrors(): string[] {
   return out.slice(-10)
 }
 
+/**
+ * Page text including same-origin iframes (mail readers) and open shadow roots
+ * (web-component apps like ING Business), where innerText sees nothing.
+ */
+const PAGE_TEXT_JS = `(() => {
+  const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+  // Renders like the browser does: a host shows its shadow tree, a <slot> shows the light DOM assigned to it
+  const deep = (nodes) => {
+    let t = '';
+    for (const n of nodes) {
+      if (n.nodeType === 3) { t += n.textContent; continue; }
+      if (n.nodeType !== 1 || SKIP.has(n.tagName)) continue;
+      if (n.tagName === 'SLOT') { const a = n.assignedNodes({ flatten: true }); t += deep(a.length ? a : n.childNodes); continue; }
+      const st = getComputedStyle(n);
+      if (st.display === 'none' || st.visibility === 'hidden') continue;
+      const block = /^(block|flex|grid|table|list-item)/.test(st.display) ? '\\n' : '';
+      t += block + deep(n.shadowRoot ? n.shadowRoot.childNodes : n.childNodes) + block;
+    }
+    return t;
+  };
+  const hasShadow = (d) => [...d.querySelectorAll('*')].some((e) => e.shadowRoot);
+  const docs = [document];
+  for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument) docs.push(f.contentDocument) } catch {} }
+  return docs.map((d) => (!d.body ? '' : hasShadow(d) ? deep(d.body.childNodes).replace(/[ \\t]+/g, ' ').replace(/\\n\\s*\\n+/g, '\\n') : d.body.innerText)).join('\\n');
+})()`
+
 // ---------- element location ----------
 
 const locateJs = (sel: { selector?: string; text?: string }): string => `(() => {
@@ -101,9 +129,12 @@ const locateJs = (sel: { selector?: string; text?: string }): string => `(() => 
   if (sel.selector) el = document.querySelector(sel.selector);
   else if (sel.text) {
     const want = sel.text.toLowerCase();
-    const all = [...document.querySelectorAll('a,button,input,textarea,[role],[draggable="true"],[tabindex],span,div,h1,h2,h3')];
     const txt = (e) => (e.innerText || e.value || e.title || e.getAttribute('aria-label') || '').trim().toLowerCase();
-    el = all.find((e) => txt(e) === want) || all.find((e) => txt(e).includes(want));
+    const visible = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 };
+    // Smallest visible element containing the text — never a container that merely includes it
+    const all = [...document.body.querySelectorAll('*')].filter((e) => visible(e) && txt(e).includes(want));
+    const leaves = all.filter((e) => ![...e.children].some((c) => visible(c) && txt(c).includes(want)));
+    el = leaves.find((e) => txt(e) === want) || leaves[0] || null;
   }
   if (!el) return null;
   el.scrollIntoView({ block: 'nearest' });
@@ -121,9 +152,21 @@ const DESCRIBE_FN = `function describe(e) {
 }`
 
 /** What sits under (x, y), and whether it is (inside) the intended element */
+/** elementFromPoint that descends into open shadow roots (web components) */
+const DEEP_HIT_FN = `function deepHit(x, y) {
+  let hit = document.elementFromPoint(x, y);
+  while (hit && hit.shadowRoot) {
+    const inner = hit.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  return hit;
+}`
+
 const hitJs = (x: number, y: number): string => `(() => {
   ${DESCRIBE_FN}
-  const hit = document.elementFromPoint(${x}, ${y});
+  ${DEEP_HIT_FN}
+  const hit = deepHit(${x}, ${y});
   const target = document.querySelector('[data-drift-target]');
   const ok = !target || !!(hit && (hit === target || target.contains(hit)));
   return { ok, hit: describe(hit), target: target ? describe(target) : null };
@@ -136,7 +179,8 @@ async function hitForRef(wc: WebContents, backendNodeId: number, x: number, y: n
     objectId: target.objectId,
     functionDeclaration: `function (x, y) {
       ${DESCRIBE_FN}
-      const hit = document.elementFromPoint(x, y);
+      ${DEEP_HIT_FN}
+      const hit = deepHit(x, y);
       const ok = !!(hit && (hit === this || this.contains(hit)));
       return { ok, hit: describe(hit), target: describe(this) };
     }`,
@@ -145,6 +189,34 @@ async function hitForRef(wc: WebContents, backendNodeId: number, x: number, y: n
   })) as { result: { value: { ok: boolean; hit: string; target: string } } }
   return result.value
 }
+
+// ---------- 1Password secrets ----------
+
+/**
+ * Secrets are read by Drift itself (a long-lived process), so 1Password's Touch ID approval
+ * covers the whole session instead of every short-lived CLI call. Values live in memory only.
+ */
+const SECRET_TTL = 30 * 60_000
+const secretCache = new Map<string, { value: string; at: number }>()
+
+async function readSecret(ref: string): Promise<string> {
+  if (!/^op:\/\//.test(ref)) throw new Error('--secret przyjmuje tylko odnośnik op://vault/item/pole (1Password)')
+  const cached = secretCache.get(ref)
+  // One-time codes change every 30 s: never cache them
+  const isOtp = /attribute=otp/i.test(ref)
+  if (cached && !isOtp && Date.now() - cached.at < SECRET_TTL) return cached.value
+  try {
+    const { stdout } = await promisify(execFile)('op', ['read', '--no-newline', ref], { timeout: 120_000 })
+    if (!isOtp) secretCache.set(ref, { value: stdout, at: Date.now() })
+    return stdout
+  } catch (e) {
+    const msg = String((e as { stderr?: string }).stderr || (e as Error).message).split('\n')[0]
+    throw new Error(`1Password: nie udało się odczytać ${ref}: ${msg}`)
+  }
+}
+
+/** Fields that received a secret: their values are masked in every tree/snapshot */
+const secretFields = new WeakMap<WebContents, Set<number>>()
 
 // ---------- unified selectors ----------
 
@@ -325,63 +397,61 @@ async function scoped(wc: WebContents, raw: string, scope: Scope): Promise<numbe
 
 const hasScope = (s: Scope): boolean => !!(s.within || s.near || s.nth || s.all)
 
-/** Marks the editable element at/inside a DOM node (the node itself, or an input in a wrapper) */
-const MARK_EDITABLE_FN = `function () {
+/** Finds the editable element at/inside a node (the node itself, an input in a wrapper, or a lazily editable field) */
+const FIND_EDITABLE_FN = `function () {
+  const sel = 'input:not([type=hidden]):not([type=checkbox]):not([type=radio]),textarea,[contenteditable=""],[contenteditable="true"]';
   const isEditable = (e) => e && (e.matches('input:not([type=hidden]):not([type=checkbox]):not([type=radio]),textarea,select') || e.isContentEditable);
-  let el = isEditable(this) ? this : this.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]),textarea,[contenteditable=""],[contenteditable="true"]');
+  const inside = (root) => root.querySelector(sel) || [...root.querySelectorAll('*')].map((e) => e.shadowRoot && inside(e.shadowRoot)).find(Boolean) || null;
+  let el = isEditable(this) ? this : inside(this) || (this.shadowRoot && inside(this.shadowRoot));
   // Some editors (Keep, Docs) only turn contenteditable on after a click: accept a focusable text-field role
   if (!el && this.matches('[role=textbox],[role=combobox],[role=searchbox],[tabindex]')) el = this;
-  if (!el) return false;
-  document.querySelectorAll('[data-drift-target]').forEach((e) => e.removeAttribute('data-drift-target'));
-  el.setAttribute('data-drift-target', '1');
-  el.scrollIntoView({ block: 'nearest' });
-  return true;
+  if (el) el.scrollIntoView({ block: 'nearest' });
+  return el || null;
 }`
 
-/** Like point(), but aims at the actual editable field, never a wrapper */
-async function editablePoint(wc: WebContents, raw: string, node?: number): Promise<Awaited<ReturnType<typeof point>>> {
+/** Like point(), but aims at the actual editable field, never a wrapper; also returns its object handle */
+async function editablePoint(wc: WebContents, raw: string, node?: number): Promise<Awaited<ReturnType<typeof point>> & { objectId: string }> {
   const r: Resolved = node ? { kind: 'node', backendNodeId: node } : await resolve(wc, raw)
-  let marked = false
+  let objectId: string
   if (r.kind === 'node') {
-    const { object } = (await wc.debugger.sendCommand('DOM.resolveNode', { backendNodeId: r.backendNodeId })) as { object: { objectId: string } }
-    const { result } = (await wc.debugger.sendCommand('Runtime.callFunctionOn', {
-      objectId: object.objectId,
-      functionDeclaration: MARK_EDITABLE_FN,
-      returnByValue: true
-    })) as { result: { value: boolean } }
-    marked = result.value
+    objectId = (await cdp<{ object: { objectId: string } }>(wc, 'DOM.resolveNode', { backendNodeId: r.backendNodeId })).object.objectId
   } else {
-    marked = await wc.executeJavaScript(`(${MARK_EDITABLE_FN}).call(document.querySelector('[data-drift-target]'))`)
+    const { result } = await cdp<{ result: { objectId?: string } }>(wc, 'Runtime.evaluate', { expression: `document.querySelector('[data-drift-target]')` })
+    if (!result.objectId) throw new Error(`Nie znaleziono: ${raw}`)
+    objectId = result.objectId
   }
-  if (!marked) throw new Error(`${raw} nie jest polem tekstowym i nie zawiera żadnego`)
-  const box = (await wc.executeJavaScript(
-    `(() => { const r = document.querySelector('[data-drift-target]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`
-  )) as { x: number; y: number }
-  const x = Math.round(box.x)
-  const y = Math.round(box.y)
-  return { x, y, hit: await wc.executeJavaScript(hitJs(x, y)) }
+  const { result } = await cdp<{ result: { objectId?: string; subtype?: string } }>(wc, 'Runtime.callFunctionOn', { objectId, functionDeclaration: FIND_EDITABLE_FN })
+  if (!result.objectId || result.subtype === 'null') throw new Error(`${raw} nie jest polem tekstowym i nie zawiera żadnego`)
+  const { node: desc } = await cdp<{ node: { backendNodeId: number } }>(wc, 'DOM.describeNode', { objectId: result.objectId })
+  const p = await nodePoint(wc, desc.backendNodeId)
+  const x = Math.round(p.x)
+  const y = Math.round(p.y)
+  return { x, y, backendNodeId: desc.backendNodeId, objectId: result.objectId, hit: await hitForRef(wc, desc.backendNodeId, x, y) }
 }
 
 /** After the click: make sure the field has focus, replace its content, verify the result */
-async function fillFocused(wc: WebContents, value: string): Promise<string> {
+async function fillFocused(wc: WebContents, objectId: string, value: string, secret = false): Promise<string> {
   await sleep(50)
-  const focus = (await wc.executeJavaScript(`(() => {
-    const t = document.querySelector('[data-drift-target]');
-    const a = document.activeElement;
-    if (t && a !== t && !t.contains(a)) t.focus();
-    const e = document.activeElement;
-    if (!t || (e !== t && !t.contains(e))) return { ok: false, active: e ? e.tagName.toLowerCase() : 'nic' };
-    if (typeof e.select === 'function') e.select();
-    else if (e.isContentEditable) document.getSelection().selectAllChildren(e);
-    else return { ok: false, active: e.tagName.toLowerCase() + ' (nieedytowalny po kliknięciu)' };
+  const call = async <T>(fn: string): Promise<T> =>
+    (await cdp<{ result: { value: T } }>(wc, 'Runtime.callFunctionOn', { objectId, functionDeclaration: fn, returnByValue: true })).result.value
+  // Focus may live inside a shadow root: compare against the field's own root
+  const focus = await call<{ ok: boolean; active?: string }>(`function () {
+    const root = this.getRootNode();
+    const active = () => root.activeElement || document.activeElement;
+    if (active() !== this && !this.contains(active())) this.focus();
+    const e = active();
+    if (e !== this && !this.contains(e)) return { ok: false, active: e ? e.tagName.toLowerCase() : 'nic' };
+    if (typeof this.select === 'function') this.select();
+    else if (this.isContentEditable) { const s = (root.getSelection ? root : document).getSelection(); s.selectAllChildren(this) }
+    else return { ok: false, active: this.tagName.toLowerCase() + ' (nieedytowalny po kliknięciu)' };
     return { ok: true };
-  })()`)) as { ok: boolean; active?: string }
+  }`)
   if (!focus.ok) throw new Error(`Po kliknięciu fokus jest na ${focus.active}, nie na polu — nic nie wpisano`)
   wc.insertText(value)
   await sleep(50)
-  const now = String(
-    await wc.executeJavaScript(`(() => { const t = document.querySelector('[data-drift-target]'); return t ? (t.value ?? t.innerText ?? '') : '' })()`)
-  )
+  const now = String(await call<string>(`function () { return this.value ?? this.innerText ?? '' }`))
+  // Password fields hide their value; for secrets never echo anything back
+  if (secret) return now.length >= value.length ? `wpisano •••••• (${value.length} znaków z 1Password)` : 'wpisano •••••• (nie udało się potwierdzić długości)'
   if (!now.includes(value.slice(0, 20))) throw new Error(`Pole zawiera ${JSON.stringify(now.slice(0, 60))} zamiast wpisanego tekstu`)
   return `wpisano ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
 }
@@ -478,16 +548,21 @@ async function checkCondition(ctx: ControlContext, c: Condition, target: Target)
   if (c.key === 'el') {
     const wc = ctx.target(target)
     if (!wc) return false
-    const found = await resolve(wc, c.value).then(
-      () => true,
-      () => false
-    )
+    const sel = parseSelector(c.value)
+    const found = sel.css
+      ? await wc
+          .executeJavaScript(`(() => [...document.querySelectorAll(${JSON.stringify(sel.css)})].some((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 }))()`)
+          .catch(() => false)
+      : await resolve(wc, c.value).then(
+          () => true,
+          () => false
+        )
     return c.op.startsWith('!') ? !found : found
   }
   if (c.key === 'text') {
     const wc = ctx.target(target)
     if (!wc) return false
-    const body = String(await wc.executeJavaScript('document.body.innerText').catch(() => '')).toLowerCase()
+    const body = String(await wc.executeJavaScript(PAGE_TEXT_JS).catch(() => '')).toLowerCase()
     const has = body.includes(c.value.toLowerCase())
     return c.op.startsWith('!') ? !has : has
   }
@@ -556,13 +631,14 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       const root = p.within ? await resolve(target, p.within as string, false) : null
       if (root && root.kind !== 'node') throw new Error('--within dla tree wymaga selektora roli/nazwy albo ref')
       return await axTree(target, {
+        mask: secretFields.get(target),
         all: !!p.all || !!root,
         filter: p.filter as string | undefined,
         rootBackendId: root?.kind === 'node' ? root.backendNodeId : undefined
       })
     }
     case 'text':
-      return String(await wc().executeJavaScript('document.body.innerText')).slice(0, Number(p.limit ?? 8000))
+      return String(await wc().executeJavaScript(PAGE_TEXT_JS)).slice(0, Number(p.limit ?? 8000))
     case 'eval':
       return await wc().executeJavaScript(p.code as string, true)
     case 'wait': {
@@ -615,7 +691,13 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       }
       const done: string[] = []
       for (const node of nodes) {
-        const locate = (): ReturnType<typeof point> => (method === 'fill' ? editablePoint(target, raw, node) : point(target, raw, node))
+        let editable: string | undefined
+        const locate = async (): ReturnType<typeof point> => {
+          if (method !== 'fill') return point(target, raw, node)
+          const e = await editablePoint(target, raw, node)
+          editable = e.objectId
+          return e
+        }
         let pt = await locate()
         // Compact sidebar: slide it in instead of clicking into the void
         if (targetName === 'sidebar' && !pt.hit?.ok && ctx.status().mode === 'edge') {
@@ -659,7 +741,14 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
           target.sendInputEvent({ ...base, type: 'mouseUp', clickCount: 2 })
         }
         if (method === 'click') done.push(`klik @${x},${y}`)
-        else done.push(await fillFocused(target, String(p.value ?? '')))
+        else {
+          const value = p.secretRef ? await readSecret(String(p.secretRef)) : String(p.value ?? '')
+          done.push(await fillFocused(target, editable!, value, !!p.secretRef))
+          if (p.secretRef && pt.backendNodeId) {
+            if (!secretFields.has(target)) secretFields.set(target, new Set())
+            secretFields.get(target)!.add(pt.backendNodeId)
+          }
+        }
         if (nodes.length > 1) await sleep(80)
       }
       return nodes.length > 1 ? `${done.length}×: ${done.join(', ')}` : done[0]
@@ -669,7 +758,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       // Containers (regions, dialogs) often have no box of their own: skip the visibility check
       const r = await resolve(target, p.sel as string, false)
       if (r.kind !== 'node') throw new Error('snapshot wymaga selektora roli/nazwy albo ref')
-      return await axTree(target, { all: true, rootBackendId: r.backendNodeId, filter: p.filter as string | undefined })
+      return await axTree(target, { all: true, rootBackendId: r.backendNodeId, filter: p.filter as string | undefined, mask: secretFields.get(target) })
     }
     case 'goto': {
       // Navigate and make sure we actually end up there: SPAs redirect, pages refuse to unload
@@ -704,9 +793,13 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       }
       throw new Error(`Nie udało się otworzyć ${want} — jest ${ctx.status().url}`)
     }
+    case 'cdp': {
+      // Raw DevTools Protocol for diagnostics (network, console, emulation) without code changes
+      return await cdp(wc(), String(p.cmd), (p.args as object) ?? {})
+    }
     case 'extract': {
       // Regex over the page text; the result can feed later steps of a run via --as
-      const text = String(await wc().executeJavaScript('document.body.innerText'))
+      const text = String(await wc().executeJavaScript(PAGE_TEXT_JS))
       const m = String(p.pattern).match(/^\/(.+)\/([a-z]*)$/)
       const re = new RegExp(m ? m[1] : String(p.pattern), (m?.[2] ?? '').replace('g', '') + 'g')
       const found = [...new Set([...text.matchAll(re)].map((x) => x[1] ?? x[0]))]

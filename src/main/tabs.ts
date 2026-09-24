@@ -10,6 +10,43 @@ interface LiveTab {
   info: RuntimeTab
 }
 
+/**
+ * Identify as Google Chrome in User-Agent Client Hints too (Sec-CH-UA / navigator.userAgentData).
+ * Some sites (banks) silently refuse to render for an unknown "Chromium"-only brand list.
+ */
+function presentAsChrome(wc: Electron.WebContents): void {
+  const major = process.versions.chrome.split('.')[0]
+  const full = process.versions.chrome
+  const ua = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`
+  const brands = [
+    { brand: 'Google Chrome', version: major },
+    { brand: 'Chromium', version: major },
+    { brand: 'Not?A_Brand', version: '24' }
+  ]
+  try {
+    wc.debugger.attach('1.3')
+    wc.once('destroyed', () => wc.debugger.isAttached() && wc.debugger.detach())
+    wc.debugger
+      .sendCommand('Emulation.setUserAgentOverride', {
+        userAgent: ua,
+        userAgentMetadata: {
+          brands,
+          fullVersionList: brands.map((b) => ({ ...b, version: b.brand === 'Not?A_Brand' ? '24.0.0.0' : full })),
+          fullVersion: full,
+          platform: 'macOS',
+          platformVersion: '15.0.0',
+          architecture: process.arch === 'arm64' ? 'arm' : 'x86',
+          bitness: '64',
+          model: '',
+          mobile: false
+        }
+      })
+      .catch(() => {})
+  } catch {
+    // Debugger already attached (DevTools protocol client): keep the default identity
+  }
+}
+
 const BADGE_RE = /\(\d[\d\s.,]*\+?\)|^\*/
 
 /**
@@ -103,6 +140,7 @@ export class TabManager {
     view.setBackgroundColor('#ffffff')
     const wc = view.webContents
     const tab = this.tabs.get(id)!
+    presentAsChrome(wc)
 
     const sync = (): void => {
       tab.info.url = wc.getURL() || tab.info.url

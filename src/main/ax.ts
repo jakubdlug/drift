@@ -93,6 +93,8 @@ export interface AxOptions {
   filter?: string
   /** Start the walk at this DOM node (snapshot of one region/dialog) */
   rootBackendId?: number
+  /** DOM nodes whose values must never be shown (filled from 1Password) */
+  mask?: Set<number>
 }
 
 export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<string> {
@@ -137,7 +139,8 @@ export async function axTree(wc: WebContents, opts: AxOptions = {}): Promise<str
         }
         line += role === 'StaticText' ? `"${name.slice(0, 120)}"` : `${role}${name ? ` "${name.slice(0, 100)}"` : ''}`
         const val = n.value?.value
-        if (val !== undefined && val !== '' && role !== 'link') line += ` = "${String(val).slice(0, 60)}"`
+        const masked = !!(n.backendDOMNodeId && opts.mask?.has(n.backendDOMNodeId))
+        if (val !== undefined && val !== '' && role !== 'link') line += masked ? ' = "••••••"' : ` = "${String(val).slice(0, 60)}"`
         for (const p of n.properties ?? []) {
           // CDP reports tristate props as strings ("true" / "false" / "mixed")
           const on = p.value.value === true || p.value.value === 'true' || p.value.value === 'mixed'

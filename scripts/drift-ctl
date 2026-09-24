@@ -27,6 +27,10 @@ target: sidebar (domyślnie) | page | find
   snapshot <target> <sel>       drzewo jednego fragmentu, np. dialog (--filter)
   click <target> <sel>          klik (--right, --double, --mod cmd,shift, --force)
   fill <target> <sel> <tekst>   klik w pole, zastąp zawartość, wpisz
+  fill <target> <sel> --secret op://vault/item/pole
+                                wartość z 1Password (hasło, login, ?attribute=otp) — nigdy nie
+                                trafia do argumentów, wyniku ani logów
+  secrets <fraza>               wpisy 1Password pasujące do nazwy/URL (tylko metadane, bez haseł)
 
   zawężanie (click/hover/fill):
     --within <sel>              tylko wewnątrz kontenera, np. --within dialog
@@ -43,6 +47,7 @@ target: sidebar (domyślnie) | page | find
   text [target]                 innerText widoku
   screenshot [target] [ścieżka] zrzut PNG (tylko gdy naprawdę potrzebny)
   logs [--clear]                logi konsoli sidebara i paska wyszukiwania
+  cdp <target> <Metoda> [json]  surowe wywołanie DevTools Protocol (diagnostyka)
   run [plik]                    wykonaj skrypt (jedna komenda na linię, # komentarz)
                                 w JEDNYM zapytaniu; stop na pierwszym błędzie
                                 zmienne: extract/eval --as ids, potem \${ids} \${ids[0]}
@@ -52,7 +57,7 @@ Komendy zmieniające stan same raportują: zmiany statusu (Δ), co trafił klik 
 i nowe błędy (✖). Restart Drifta między komendami jest sygnalizowany (⚠).`
 
 const BOOL_FLAGS = new Set(['right', 'double', 'clear', 'all', 'json', 'force', 'new'])
-const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter', 'within', 'near', 'nth', 'fail', 'as', 'limit'])
+const VALUE_FLAGS = new Set(['sel', 'mod', 'timeout', 'filter', 'within', 'near', 'nth', 'fail', 'as', 'limit', 'secret'])
 const TARGETS = ['sidebar', 'page', 'find']
 const MUTATING = new Set(['click', 'type', 'key', 'menu', 'action', 'hover', 'mouse', 'fill', 'open', 'goto'])
 
@@ -131,6 +136,12 @@ function buildRequest({ cmd, rest, flags }) {
     }
     case 'fill': {
       const target = takeTarget()
+      // --secret op://…: the value comes from 1Password and never appears in args, output or logs
+      if (flags.secret) {
+        // Drift resolves the reference itself (one Touch ID per session, in-memory cache)
+        if (!/^op:\/\//.test(flags.secret)) throw new Error('--secret przyjmuje tylko odnośnik op://vault/item/pole (1Password)')
+        return { method: 'fill', params: { target, sel: flags.sel ? `css:${flags.sel}` : r.join(' '), secretRef: flags.secret, force: !!flags.force, ...scope } }
+      }
       const value = r.pop()
       return { method: 'fill', params: { target, sel: flags.sel ? `css:${flags.sel}` : r.join(' '), value, force: !!flags.force, ...scope } }
     }
@@ -172,6 +183,10 @@ function buildRequest({ cmd, rest, flags }) {
     }
     case 'logs':
       return { method: 'logs', params: { clear: !!flags.clear } }
+    case 'cdp': {
+      const target = takeTarget()
+      return { method: 'cdp', params: { target, cmd: r[0], args: r[1] ? JSON.parse(r.slice(1).join(' ')) : {} } }
+    }
     case 'state':
     case 'status':
       return { method: cmd, params: {} }
@@ -226,6 +241,21 @@ function report(r, cmd) {
 const top = parseArgs(process.argv.slice(2))
 if (!top.cmd || top.cmd === 'help') {
   console.log(USAGE)
+  process.exit(0)
+}
+
+if (top.cmd === 'secrets') {
+  // Metadata only: titles, URLs and field labels — never values
+  const { execFileSync } = require('child_process')
+  const q = top.rest.join(' ').toLowerCase()
+  const items = JSON.parse(execFileSync('op', ['item', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 120000 }))
+  const hits = items.filter((i) => `${i.title} ${(i.urls || []).map((u) => u.href).join(' ')}`.toLowerCase().includes(q))
+  for (const i of hits.slice(0, 15)) {
+    const detail = JSON.parse(execFileSync('op', ['item', 'get', i.id, '--format', 'json'], { encoding: 'utf8', timeout: 120000 }))
+    const fields = (detail.fields || []).filter((f) => f.label && (f.value !== undefined || f.type === 'OTP')).map((f) => (f.type === 'OTP' ? `${f.label} [OTP]` : f.label))
+    console.log(`op://${i.vault.name}/${i.id}  "${i.title}"  ${(i.urls || []).map((u) => u.href).slice(0, 2).join(' ')}\n   pola: ${fields.join(', ')}`)
+  }
+  if (!hits.length) console.log(`Brak wpisów pasujących do "${q}"`)
   process.exit(0)
 }
 
