@@ -1,4 +1,5 @@
 import { app, Menu, type MenuItem, type WebContents } from 'electron'
+import { readRef, search as searchLogins } from './passwords'
 import { execFile } from 'child_process'
 import { randomBytes, randomUUID } from 'crypto'
 import { promisify } from 'util'
@@ -146,7 +147,9 @@ const locateJs = (sel: { selector?: string; text?: string }): string => `(() => 
 
 const DESCRIBE_FN = `function describe(e) {
   if (!e) return 'nothing';
-  const label = (e.getAttribute('aria-label') || e.title || e.innerText || e.value || '').replace(/\\s+/g, ' ').trim().slice(0, 50);
+  // Never echo what was typed into a field (passwords, secrets) — only button-like values
+  const typed = (e.tagName === 'INPUT' && !/^(submit|button|reset)$/.test(e.type)) || e.tagName === 'TEXTAREA';
+  const label = (e.getAttribute('aria-label') || e.title || e.innerText || (typed ? e.placeholder || e.name : e.value) || '').replace(/\\s+/g, ' ').trim().slice(0, 50);
   const cls = typeof e.className === 'string' ? e.className.split(' ').filter((c) => c && !c.startsWith('svelte-') && !c.startsWith('s-')).slice(0, 2).join('.') : '';
   return e.tagName.toLowerCase() + (cls ? '.' + cls : '') + (label ? ' "' + label + '"' : '');
 }`
@@ -199,8 +202,10 @@ async function hitForRef(wc: WebContents, backendNodeId: number, x: number, y: n
 const SECRET_TTL = 30 * 60_000
 const secretCache = new Map<string, { value: string; at: number }>()
 
-async function readSecret(ref: string): Promise<string> {
-  if (!/^op:\/\//.test(ref)) throw new Error('--secret only accepts an op://vault/item/field reference (1Password)')
+async function readSecret(ref: string, pageUrl: string): Promise<string> {
+  // drift://… — Drift's own vault (imported from Safari), only for a page on the entry's site
+  if (/^drift:\/\//.test(ref)) return readRef(ref, pageUrl)
+  if (!/^op:\/\//.test(ref)) throw new Error('--secret only accepts op://vault/item/field (1Password) or drift://id/password (Drift)')
   const cached = secretCache.get(ref)
   // One-time codes change every 30 s: never cache them
   const isOtp = /attribute=otp/i.test(ref)
@@ -451,7 +456,7 @@ async function fillFocused(wc: WebContents, objectId: string, value: string, sec
   await sleep(50)
   const now = String(await call<string>(`function () { return this.value ?? this.innerText ?? '' }`))
   // Password fields hide their value; for secrets never echo anything back
-  if (secret) return now.length >= value.length ? `typed •••••• (${value.length} characters from 1Password)` : 'typed •••••• (could not confirm length)'
+  if (secret) return now.length >= value.length ? `typed •••••• (${value.length} characters from the password vault)` : 'typed •••••• (could not confirm length)'
   if (!now.includes(value.slice(0, 20))) throw new Error(`The field contains ${JSON.stringify(now.slice(0, 60))} instead of the typed text`)
   return `typed ${JSON.stringify(now.length > 60 ? now.slice(0, 60) + '…' : now)}`
 }
@@ -742,7 +747,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
         }
         if (method === 'click') done.push(`click @${x},${y}`)
         else {
-          const value = p.secretRef ? await readSecret(String(p.secretRef)) : String(p.value ?? '')
+          const value = p.secretRef ? await readSecret(String(p.secretRef), target.getURL()) : String(p.value ?? '')
           done.push(await fillFocused(target, editable!, value, !!p.secretRef))
           if (p.secretRef && pt.backendNodeId) {
             if (!secretFields.has(target)) secretFields.set(target, new Set())
@@ -835,6 +840,12 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       writeFileSync(path, (await wc().capturePage()).toPNG())
       return path
     }
+    case 'secrets': {
+      // Metadata only — never passwords
+      const hits = searchLogins(String(p.query ?? ''))
+      if (!hits.length) return `No passwords in Drift matching "${p.query ?? ''}"`
+      return hits.map((h) => `${h.ref}/password  "${h.title}"  ${h.url}\n   login: ${h.username || '(none)'}  (username: ${h.ref}/username)`).join('\n')
+    }
     case 'logs': {
       const out = logs.slice(-Number(p.limit ?? 50)).map((l) => l.line)
       if (p.clear) {
@@ -844,7 +855,7 @@ async function run(ctx: ControlContext, method: string, p: Record<string, unknow
       return out.join('\n')
     }
     default:
-      throw new Error('Metody: state, status, action, menu, open, goto, tree, snapshot, text, extract, eval, wait, click, hover, fill, mouse, type, key, screenshot, logs, batch')
+      throw new Error('Metody: state, status, action, menu, open, goto, tree, snapshot, text, extract, eval, wait, click, hover, fill, mouse, type, key, screenshot, logs, secrets, batch')
   }
 }
 

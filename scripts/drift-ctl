@@ -30,7 +30,9 @@ target: sidebar (domyślnie) | page | find
   fill <target> <sel> --secret op://vault/item/pole
                                 wartość z 1Password (hasło, login, ?attribute=otp) — nigdy nie
                                 trafia do argumentów, wyniku ani logów
-  secrets <fraza>               wpisy 1Password pasujące do nazwy/URL (tylko metadane, bez haseł)
+  fill <target> <sel> --secret drift://id/password
+                                hasło z sejfu Drifta (import z Safari) — tylko na stronie tej samej witryny
+  secrets <fraza>               zapisane hasła (Drift, 1Password) pasujące do nazwy/URL — tylko metadane
 
   zawężanie (click/hover/fill):
     --within <sel>              tylko wewnątrz kontenera, np. --within dialog
@@ -139,7 +141,7 @@ function buildRequest({ cmd, rest, flags }) {
       // --secret op://…: the value comes from 1Password and never appears in args, output or logs
       if (flags.secret) {
         // Drift resolves the reference itself (one Touch ID per session, in-memory cache)
-        if (!/^op:\/\//.test(flags.secret)) throw new Error('--secret przyjmuje tylko odnośnik op://vault/item/pole (1Password)')
+        if (!/^(op|drift):\/\//.test(flags.secret)) throw new Error('--secret przyjmuje tylko op://vault/item/pole (1Password) albo drift://id/password (hasła Drifta)')
         return { method: 'fill', params: { target, sel: flags.sel ? `css:${flags.sel}` : r.join(' '), secretRef: flags.secret, force: !!flags.force, ...scope } }
       }
       const value = r.pop()
@@ -248,6 +250,19 @@ if (top.cmd === 'secrets') {
   // Metadata only: titles, URLs and field labels — never values
   const { execFileSync } = require('child_process')
   const q = top.rest.join(' ').toLowerCase()
+  // Drift's own vault (imported from Safari) first
+  try {
+    process.stdout.write(execFileSync(process.execPath, [__filename, 'secrets-drift', ...top.rest], { encoding: 'utf8' }))
+  } catch {
+    console.log('(Drift nie działa — pomijam jego hasła)')
+  }
+  let hasOp = true
+  try {
+    execFileSync('which', ['op'], { stdio: 'ignore' })
+  } catch {
+    hasOp = false
+  }
+  if (!hasOp) process.exit(0)
   const items = JSON.parse(execFileSync('op', ['item', 'list', '--format', 'json'], { encoding: 'utf8', timeout: 120000 }))
   const hits = items.filter((i) => `${i.title} ${(i.urls || []).map((u) => u.href).join(' ')}`.toLowerCase().includes(q))
   for (const i of hits.slice(0, 15)) {
@@ -269,7 +284,8 @@ try {
       .filter((l) => l && !l.startsWith('#'))
       .map((line) => ({ ...buildRequest(parseArgs(tokenize(line))), line }))
     body = { method: 'batch', steps }
-  } else body = buildRequest(top)
+  } else if (top.cmd === 'secrets-drift') body = { method: 'secrets', params: { query: top.rest.join(' ') } }
+  else body = buildRequest(top)
 } catch (e) {
   console.error(e.message)
   process.exit(1)

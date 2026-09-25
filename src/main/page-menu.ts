@@ -5,6 +5,7 @@ export interface PageMenuDeps {
   openTab: (url: string, background: boolean) => void
   openIncognito: (url: string) => void
   searchUrl: string
+  fillLogin?: () => void
 }
 
 /** Native right-click menu for web pages, roughly matching Chrome's */
@@ -42,6 +43,7 @@ export function showPageMenu(wc: WebContents, p: ContextMenuParams, deps: PageMe
   }
 
   if (p.isEditable) {
+    if (deps.fillLogin) items.push({ label: 'Fill login', click: deps.fillLogin }, { type: 'separator' })
     items.push(
       { role: 'undo', label: 'Undo', enabled: p.editFlags.canUndo },
       { role: 'redo', label: 'Redo', enabled: p.editFlags.canRedo },

@@ -30,6 +30,8 @@ export interface MenuActions {
   findNext: () => void
   findPrev: () => void
   setDefaultBrowser: () => void
+  importPasswords: () => void
+  fillLogin: () => void
 }
 
 export function buildMenu(a: MenuActions): Menu {
@@ -67,7 +69,9 @@ export function buildMenu(a: MenuActions): Menu {
         { label: 'Close tab', accelerator: 'Cmd+W', click: a.closeTab },
         { label: 'Reopen closed tab', accelerator: 'Cmd+Shift+T', click: a.reopen },
         { type: 'separator' },
-        { label: 'Print…', accelerator: 'Cmd+P', click: a.print }
+        { label: 'Print…', accelerator: 'Cmd+P', click: a.print },
+        { type: 'separator' },
+        { label: 'Import passwords from Safari…', click: a.importPasswords }
       ]
     },
     {
@@ -86,7 +90,8 @@ export function buildMenu(a: MenuActions): Menu {
         { label: 'Find next', accelerator: 'Cmd+G', click: a.findNext },
         { label: 'Find previous', accelerator: 'Cmd+Shift+G', click: a.findPrev },
         { type: 'separator' },
-        { label: 'Copy URL', accelerator: 'Cmd+Shift+C', click: a.copyUrl }
+        { label: 'Copy URL', accelerator: 'Cmd+Shift+C', click: a.copyUrl },
+        { label: 'Fill login', accelerator: 'Cmd+Shift+L', click: a.fillLogin }
       ]
     },
     {

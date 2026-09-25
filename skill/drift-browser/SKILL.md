@@ -90,6 +90,9 @@ Target: `page` (active tab), `sidebar` (Drift UI), `find` (⌘F bar).
 - Passwords **only from 1Password**, via reference — the value never enters the context:
   `drift-ctl secrets ing` → `fill page textbox Login --secret op://Personal/<id>/login`.
   Drift reads it itself (one Touch ID per session, cached in memory for 30 min; OTP: `?attribute=otp`).
+- Or from **Drift's own vault** (imported from Safari): `drift-ctl secrets <site>` lists `drift://<id>/password`
+  and `drift://<id>/username`; use them with `--secret` the same way. Drift refuses a reference on a page of another site.
+  No 1Password (`op` missing) → use the Drift vault; nothing there → ask the user to log in themselves in the Drift window.
 - **Never ask for a password in chat or a messenger.** SMS codes / in-app bank confirmations:
   ask the user (e.g. Telegram) and type the code with keystrokes, don't echo it.
 - Fields filled with a secret are masked in `tree`/`snapshot`, but the page may display the

@@ -33,6 +33,17 @@ When the version is good: `npm run install-app`.
 
 Not imported: passwords, extensions, Boosts, Easels.
 
+## Passwords (import from Safari)
+
+macOS doesn't let other apps read Safari/iCloud Keychain passwords, so the import is a one-time export:
+
+1. Passwords app → **File → Export All Passwords…** → save the CSV
+2. Drift → **File → Import passwords from Safari…** → pick the file (Drift offers to move it to the Trash afterwards)
+
+Passwords are stored in `passwords.bin`, encrypted with a key kept in the macOS Keychain. Fill a login form with **Cmd+Shift+L** or right-click a field → **Fill login**. Chrome/Arc/1Password CSV exports work too. Passkeys can't be exported by macOS.
+
+Agents use references, never values: `drift-ctl secrets <site>` → `fill page textbox Password --secret drift://<id>/password`. A reference only types into a page of the same site as the saved entry.
+
 ## Shortcuts
 
 | Shortcut | Action |

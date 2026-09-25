@@ -2,6 +2,7 @@ import { app, BaseWindow, dialog, WebContentsView, session, shell, type Session 
 import { existsSync } from 'fs'
 import { join, parse } from 'path'
 import { showPageMenu } from './page-menu'
+import { fillLoginInteractive, loginsFor } from './passwords'
 import type { ItemId, RuntimeTab } from '@shared/types'
 import type { Store } from './store'
 
@@ -212,7 +213,8 @@ export class TabManager {
         win: this.win,
         openTab: (u, background) => this.hooks.openInNewTab(u, background),
         openIncognito: (u) => this.hooks.openIncognito(u),
-        searchUrl: this.store.state.settings.searchUrl
+        searchUrl: this.store.state.settings.searchUrl,
+        fillLogin: params.isEditable && loginsFor(wc.getURL()).length ? () => fillLoginInteractive(wc, this.win) : undefined
       })
     )
     // Pages with unsaved changes (beforeunload): Electron silently cancels by default — ask like Chrome does

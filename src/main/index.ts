@@ -1,10 +1,11 @@
-import { app, BaseWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, WebContentsView, webContents } from 'electron'
+import { app, BaseWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, shell, WebContentsView, webContents } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import type { ChromeMode, DropTarget, ItemId, Snapshot, Workspace } from '@shared/types'
 import { arcAvailable, copyStorage, importCookies, importHistory, importSidebar } from './arc-import'
 import { captureConsole, capturePageErrors, startControl, type Status } from './control'
 import { buildMenu } from './menu'
+import { count as passwordCount, fillLoginInteractive, importCsv } from './passwords'
 import { saveStateNow, statePath, Store } from './store'
 import { TabManager } from './tabs'
 
@@ -505,6 +506,8 @@ function clearToday(): void {
 
 /** Every IPC action, also exposed to the local control channel */
 const handlers: Record<string, (...args: unknown[]) => unknown> = {}
+// Control channel only (not sidebar IPC): import a password CSV without the file dialog
+handlers['import-passwords'] = (file: unknown) => importCsv(String(file))
 
 function registerIpc(): void {
   const on = (channel: string, fn: (...args: never[]) => unknown): void => {
@@ -730,6 +733,36 @@ function createWindow(): void {
       find: openFind,
       findNext: () => findStep(true),
       findPrev: () => findStep(false),
+      importPasswords: async () => {
+        const pick = await dialog.showOpenDialog(win, {
+          title: 'Import passwords',
+          message: 'Choose the CSV exported from the Passwords app (File → Export All Passwords…)',
+          defaultPath: app.getPath('downloads'),
+          filters: [{ name: 'CSV', extensions: ['csv'] }],
+          properties: ['openFile']
+        })
+        const file = pick.filePaths[0]
+        if (!file) return
+        try {
+          const r = importCsv(file)
+          const choice = await dialog.showMessageBox(win, {
+            type: 'info',
+            message: `Imported passwords: ${r.added} new, ${r.updated} updated${r.skipped ? `, ${r.skipped} skipped (no address)` : ''}. Drift now has ${passwordCount()}.`,
+            detail: 'The exported file holds every password in plain text. Move it to the Trash now?',
+            buttons: ['Move to Trash', 'Keep file'],
+            defaultId: 0,
+            cancelId: 1
+          })
+          if (choice.response === 0) await shell.trashItem(file)
+        } catch (e) {
+          dialog.showErrorBox('Import failed', (e as Error).message)
+        }
+      },
+      fillLogin: () => {
+        const wc = tabs.webContents()
+        if (wc && fillLoginInteractive(wc, win) === 'none')
+          dialog.showMessageBox(win, { type: 'info', message: 'No saved password for this site.' })
+      },
       setDefaultBrowser: () => {
         app.setAsDefaultProtocolClient('http')
         app.setAsDefaultProtocolClient('https')
