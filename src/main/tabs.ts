@@ -24,25 +24,37 @@ function presentAsChrome(wc: Electron.WebContents): void {
     { brand: 'Chromium', version: major },
     { brand: 'Not?A_Brand', version: '24' }
   ]
+  const chrome = {
+    userAgent: ua,
+    userAgentMetadata: {
+      brands,
+      fullVersionList: brands.map((b) => ({ ...b, version: b.brand === 'Not?A_Brand' ? '24.0.0.0' : full })),
+      fullVersion: full,
+      platform: 'macOS',
+      platformVersion: '15.0.0',
+      architecture: process.arch === 'arm64' ? 'arm' : 'x86',
+      bitness: '64',
+      model: '',
+      mobile: false
+    }
+  }
+  // Google sign-in rejects embedded Chromium ("browser not supported") but accepts Firefox;
+  // no userAgentMetadata → no Sec-CH-UA / navigator.userAgentData, like a real Firefox
+  const firefox = { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0) Gecko/20100101 Firefox/140.0' }
+  let current: 'chrome' | 'firefox' | null = null
+  const apply = (url: string): void => {
+    const want = /^https:\/\/accounts\.google\.com\//.test(url) ? 'firefox' : 'chrome'
+    if (want === current || wc.isDestroyed()) return
+    current = want
+    wc.debugger.sendCommand('Emulation.setUserAgentOverride', want === 'firefox' ? firefox : chrome).catch(() => {})
+  }
   try {
     // No detach on 'destroyed': the debugger goes away with its webContents, and touching it then throws
     wc.debugger.attach('1.3')
-    wc.debugger
-      .sendCommand('Emulation.setUserAgentOverride', {
-        userAgent: ua,
-        userAgentMetadata: {
-          brands,
-          fullVersionList: brands.map((b) => ({ ...b, version: b.brand === 'Not?A_Brand' ? '24.0.0.0' : full })),
-          fullVersion: full,
-          platform: 'macOS',
-          platformVersion: '15.0.0',
-          architecture: process.arch === 'arm64' ? 'arm' : 'x86',
-          bitness: '64',
-          model: '',
-          mobile: false
-        }
-      })
-      .catch(() => {})
+    apply('')
+    wc.on('did-start-navigation', (d) => {
+      if (d.isMainFrame) apply(d.url)
+    })
   } catch {
     // Debugger already attached (DevTools protocol client): keep the default identity
   }
